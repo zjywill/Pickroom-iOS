@@ -179,16 +179,26 @@ Two properties make this category valuable out of proportion to its size:
   is not a matter of taste, unlike which of two smiles is better. It should come
   first (§4.6).
 
-**One conservative threshold, and it only ever suggests.** This is the sole
-category that can propose deleting a photo with no sibling to fall back on, so
-the asymmetry is stark: a missed bad frame costs nothing, a false positive costs
-an irreplaceable photo. The threshold sits well to the safe side of balanced,
-and **there is no "delete all failed frames" button** — every flagged photo is
-reviewed one at a time. Bulk sweeps are for expired utility images, where the
-user knows what a screenshot from 2024 is without looking.
+**Two tiers, because the presentation decides how strict the threshold has to
+be.** This is the only category that can propose deleting a photo with no
+sibling to fall back on, so the asymmetry is stark: a missed bad frame costs
+nothing, a false positive costs something irreplaceable. But that cost depends
+entirely on what the app *does* with the flag.
 
-The accepted cost is recall: plenty of genuinely bad frames will not be caught.
-Loosen only with evidence from real libraries, never on intuition.
+- **`obviouslyBroken`** — near-zero variance across the entire frame: solid
+  black, solid white, a covered lens, a shutter pressed inside a bag. These are
+  not photographs of anything. Safe to sweep in bulk, still shown as a grid
+  before it commits.
+- **`probablyBad`** — out of focus, motion-blurred, severely clipped.
+  **Ordering only, never a proposal.** These are floated to the front of the
+  deck and reviewed one card at a time, so a false positive costs two seconds
+  and a swipe rather than a photo.
+
+Splitting them is what lets the second tier be generous. A single threshold
+would have to be strict enough to survive bulk deletion, and would therefore
+catch almost nothing worth catching.
+
+**There is no button that deletes `probablyBad` in bulk, at any threshold.**
 
 ### 4.3 Expired utility images
 
@@ -415,9 +425,9 @@ carries over as-is. Exact duplicates are the sole exception.
 **Failed-frame detection is new and runs without grouping.** Saliency-cropped
 Laplacian variance for focus, histogram clipping for exposure, plus a
 near-uniform-frame check for pocket shots. It scores every asset independently,
-not just group members. A single conservative threshold, suggestion only, no
-bulk action — see §4.2 for why, and prefer missing bad frames over flagging good
-ones.
+not just group members. Two tiers — `obviouslyBroken` (degenerate frames, bulk
+safe) and `probablyBad` (ordering signal only) — see §4.2 for why the split is
+what makes the second tier affordable.
 
 **Expired utility images are ranked by age, not similarity.** Detection is
 `mediaSubtypes.contains(.photoScreenshot)` and `.videoScreenRecording`, plus
@@ -524,8 +534,10 @@ device.** The Simulator covers pure logic and UI layout, nothing more.
 - Bracket guard: three frames at exposure bias −2/0/+2 within one second are
   `bracket` with a keep-all default, never a deletion prompt.
 - Versions guard: an original and its edit never form a deletion prompt.
-- **Failed-frame conservatism:** a shallow-depth-of-field portrait with a soft
-  background is **not** flagged. This is the false positive that matters most.
+- **Failed-frame tiering:** a shallow-depth-of-field portrait with a soft
+  background is **not** flagged at all — the false positive that matters most. A
+  soft-focus frame lands in `probablyBad` and is never offered for bulk action; a
+  solid-black frame lands in `obviouslyBroken`.
 - Expired-utility ordering: screenshots come back oldest-first.
 - **Video containment:** a screen recording classifies as `expiredUtility`; every
   other video is counted in the video category and enters **no** group, no
@@ -595,7 +607,8 @@ Use a **test device or a throwaway library**. Deletion is real and global.
 - No code path that empties Recently Deleted.
 - No network request on any grouping or scoring path.
 - No undeletable or shared asset can enter a delete batch.
-- The cross-year regression test and the failed-frame conservatism test pass.
+- The cross-year regression test and the failed-frame tiering test pass.
+- No bulk action exists for `probablyBad`.
 
 ---
 
@@ -609,10 +622,12 @@ counted, filterable, and otherwise left alone, because a poster frame cannot
 support the decision and the user will rightly want to watch first. Rationale in
 §4.5. Inline playback is out of scope.
 
-**Failed-frame detection uses one conservative threshold and only ever
-suggests.** No bulk action, no second aggressive tier. It is the only category
-that can propose deleting a photo with no sibling, so recall is traded away for
-safety. Loosen only with evidence from real libraries. Rationale in §4.2.
+**Failed-frame detection has two tiers.** `obviouslyBroken` — degenerate frames
+with near-zero variance, which are not photographs of anything — can be swept in
+bulk behind a review grid. `probablyBad` is an ordering signal only and is never
+proposed for deletion, which is exactly what lets its threshold be generous: a
+false positive costs a swipe, not a photo. No bulk action on `probablyBad` at
+any threshold. Rationale in §4.2.
 
 **Decisions do not sync between the iOS and macOS apps.** Both point at the same
 iCloud library, so deletions travel for free, but `pick` and `maybe` are
