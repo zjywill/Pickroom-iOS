@@ -136,15 +136,10 @@ So the app must be ready to answer this, and the answer is genuinely useful:
    already has an intuition for. This is evidence the session was worth it, not
    an input to any decision.
 2. **Coverage, not ranking.** One minute of 4K60 video is roughly 400 MB, about
-   130 HEIC stills. If the app is entirely size-blind, a user can spend a whole
-   session on photos and move less than deleting three videos would. So video
-   must be *surfaced as a category the user has not looked at*, on the grounds
-   that it is unexamined — not on the grounds that it is big. Accounting only in
-   Phase 0; playback and frame review are out of scope.
-
-Note that under Optimise Storage a video's local rendition stays comparatively
-large, so video is the one category where the device actually feels each
-deletion.
+   130 HEIC stills. If the app is entirely size-blind it never mentions the
+   largest thing in the library at all. So video is counted and shown as its own
+   filterable category — on the grounds that it is unexamined, not that it is
+   big. What the app does *not* do with it is §4.6.
 
 ### Recently Deleted
 
@@ -182,12 +177,29 @@ Two properties make this category valuable out of proportion to its size:
   frame would have sat in the library untouched forever. That was a real gap.
 - **It is the cheapest decision in the whole app.** Whether a photo is in focus
   is not a matter of taste, unlike which of two smiles is better. It should come
-  first (§4.5).
+  first (§4.6).
+
+**One conservative threshold, and it only ever suggests.** This is the sole
+category that can propose deleting a photo with no sibling to fall back on, so
+the asymmetry is stark: a missed bad frame costs nothing, a false positive costs
+an irreplaceable photo. The threshold sits well to the safe side of balanced,
+and **there is no "delete all failed frames" button** — every flagged photo is
+reviewed one at a time. Bulk sweeps are for expired utility images, where the
+user knows what a screenshot from 2024 is without looking.
+
+The accepted cost is recall: plenty of genuinely bad frames will not be caught.
+Loosen only with evidence from real libraries, never on intuition.
 
 ### 4.3 Expired utility images
 
 Screenshots, receipts, QR codes, images saved from messaging apps. Useful when
 saved, useless a week later.
+
+**Screen recordings belong here too**, not with video.
+`mediaSubtypes.contains(.videoScreenRecording)` (iOS 13+) is authoritative, and
+a screen recording is a screenshot that moves: captured to show someone
+something, dead a week later, and nobody needs to watch it back to know that.
+It is the one kind of video this app makes a judgement about.
 
 The signal here is **time decay, and it has nothing to do with size**. A
 screenshot from six months ago is almost certainly dead weight. So this category
@@ -199,7 +211,26 @@ sweep is far more effective than reviewing them one at a time.
 The same file stored twice. Unconditionally safe, and the only category where
 time distance is irrelevant (see the time-first rule in §7).
 
-### 4.5 Ordering: by certainty, not by bytes
+### 4.5 Video, deliberately left alone
+
+Everything except screen recordings is shown as a category and otherwise not
+touched: no grouping, no best shot, no deletion proposals.
+
+The reason is that **a poster frame tells you almost nothing about a video.** A
+photo's thumbnail is the photo; a video's first frame may be black, or the
+floor. Metadata heuristics do not close that gap either — a two-second clip
+looks like a misfire and may be the only footage of something, a twenty-minute
+recording looks like a forgotten camera and may be a recital. Whatever the app
+says, the user will want to watch it before deciding, and it is right that they
+should.
+
+So the app does not pretend. Video gets a category and a count so the user knows
+it is there and can work through it themselves; viewing happens in Photos.
+Inline playback is out of scope — it is a different product surface (AVPlayer,
+scrubbing, keyframe extraction, memory) and doing it badly would be worse than
+handing off.
+
+### 4.6 Ordering: by certainty, not by bytes
 
 Work is presented **cheapest decision first**.
 
@@ -384,14 +415,15 @@ carries over as-is. Exact duplicates are the sole exception.
 **Failed-frame detection is new and runs without grouping.** Saliency-cropped
 Laplacian variance for focus, histogram clipping for exposure, plus a
 near-uniform-frame check for pocket shots. It scores every asset independently,
-not just group members. Threshold must be conservative — a false positive here
-proposes deleting a photo with no sibling to fall back on, which is the worst
-error the app can make. Prefer missing bad frames over flagging good ones.
+not just group members. A single conservative threshold, suggestion only, no
+bulk action — see §4.2 for why, and prefer missing bad frames over flagging good
+ones.
 
 **Expired utility images are ranked by age, not similarity.** Detection is
-`mediaSubtypes.contains(.photoScreenshot)` plus
+`mediaSubtypes.contains(.photoScreenshot)` and `.videoScreenRecording`, plus
 `VNCalculateImageAestheticsScoresRequest.isUtility` (iOS 18+, unconditional at
-this deployment target), then presented oldest-first in bulk sweeps.
+this deployment target), then presented oldest-first in bulk sweeps. Screen
+recordings are the only video the engine classifies; see §4.5.
 
 **Best shot gets easier.** `PHAsset.burstSelectionTypes` (`.userPick` >
 `.autoPick`) is more often populated on a device library than on a Mac's, and
@@ -403,7 +435,7 @@ not the whole frame, and normalise scores **within the group**.
 **Scoring budget is tighter.** Score only cards near the current deck position,
 on a ~512 px rendition, and cache. Battery is the budget, not milliseconds.
 
-**Ordering** is by decision certainty (§4.5), so the group engine must emit a
+**Ordering** is by decision certainty (§4.6), so the group engine must emit a
 confidence value per group and the deck must sort on it.
 
 **RAW handling collapses.** ProRAW DNGs decode through ImageIO like anything
@@ -419,8 +451,9 @@ Each phase ships something usable on its own.
 
 Scaffolding, XcodeGen, permission flow including `.limited`, iCloud
 configuration detection, the three-way diagnosis from §3, the Optimise Storage
-advice where it applies, the Recently Deleted pending figure, and deletability
-filtering by `sourceType`.
+advice where it applies, the Recently Deleted pending figure, deletability
+filtering by `sourceType`, and video fetched and counted as its own category
+(§4.5) — no video features beyond that.
 
 Ships as one screen that tells the user **which situation they are in and what
 will actually help** — including the case where the honest answer is "flip a
@@ -494,6 +527,9 @@ device.** The Simulator covers pure logic and UI layout, nothing more.
 - **Failed-frame conservatism:** a shallow-depth-of-field portrait with a soft
   background is **not** flagged. This is the false positive that matters most.
 - Expired-utility ordering: screenshots come back oldest-first.
+- **Video containment:** a screen recording classifies as `expiredUtility`; every
+  other video is counted in the video category and enters **no** group, no
+  ranking, and no deletion proposal.
 - **Ordering by certainty:** given a mixed set, failed frames and exact
   duplicates precede bursts, which precede near-duplicates.
 - Group identity: same members in a different order produce the same id; group
@@ -539,16 +575,18 @@ Use a **test device or a throwaway library**. Deletion is real and global.
 8. **Bursts:** the suggested keeper matches `burstSelectionTypes` wherever a
    `.userPick` exists.
 9. **Screenshots:** the group matches the system Screenshots album; ordering is
-   oldest-first.
-10. **Scale:** 20k+ assets. First card under two seconds. 60 fps while
+   oldest-first. Screen recordings appear alongside them.
+10. **Video:** the video category count matches the library, and no video other
+    than a screen recording is ever proposed for deletion anywhere in the app.
+11. **Scale:** 20k+ assets. First card under two seconds. 60 fps while
     prefetching. Flat memory over a 300-card run.
-11. **Thermals:** fingerprinting pauses at `.serious` and resumes; Low Power Mode
+12. **Thermals:** fingerprinting pauses at `.serious` and resumes; Low Power Mode
     suspends background work.
-12. **Background:** schedule the task, charge overnight, confirm it ran and
+13. **Background:** schedule the task, charge overnight, confirm it ran and
     results are cached.
-13. **Interruption:** kill mid-session; relaunch returns to the same card with
+14. **Interruption:** kill mid-session; relaunch returns to the same card with
     every decision intact.
-14. **Undo** at maximum depth, then commit, and confirm nothing undone was
+15. **Undo** at maximum depth, then commit, and confirm nothing undone was
     deleted.
 
 ### Release gates
@@ -561,24 +599,37 @@ Use a **test device or a throwaway library**. Deletion is real and global.
 
 ---
 
-## 11. Open questions
+## 11. Decisions taken
 
-1. **Video — accounting only, or triage too?** Proposal: accounting and category
-   surfacing from Phase 0, triage deferred. A size-blind app would otherwise
-   never mention the largest thing in the library.
-2. **dHash or `VNGenerateImageFeaturePrintRequest`?** Proposal: dHash first —
+Recorded so they are not relitigated.
+
+**Video is categorised, not triaged.** Only screen recordings get a judgement,
+and they join expired utility images rather than video. Everything else is
+counted, filterable, and otherwise left alone, because a poster frame cannot
+support the decision and the user will rightly want to watch first. Rationale in
+§4.5. Inline playback is out of scope.
+
+**Failed-frame detection uses one conservative threshold and only ever
+suggests.** No bulk action, no second aggressive tier. It is the only category
+that can propose deleting a photo with no sibling, so recall is traded away for
+safety. Loosen only with evidence from real libraries. Rationale in §4.2.
+
+**Decisions do not sync between the iOS and macOS apps.** Both point at the same
+iCloud library, so deletions travel for free, but `pick` and `maybe` are
+Pickroom's own state and stay on the device that made them. Both apps say so
+plainly. CloudKit would solve it and bring permanent conflict-resolution
+complexity to two unshipped apps; the cheap fallback, if anyone ever complains,
+is a Pickroom album in the photo library itself — albums sync through iCloud
+Photos with no infrastructure at all (`PHAssetCollectionChangeRequest`).
+
+---
+
+## 12. Open questions
+
+1. **dHash or `VNGenerateImageFeaturePrintRequest`?** Proposal: dHash first —
    fast, cheap on battery, good enough inside a time window — behind a protocol.
-3. **Share `PickroomCore` with the Mac app, or duplicate?** Proposal: write it
+2. **Share `PickroomCore` with the Mac app, or duplicate?** Proposal: write it
    shareable, duplicate for now, revisit after both ship.
-4. **Does `maybe` earn its place on a phone?** Four states may be one too many
+3. **Does `maybe` earn its place on a phone?** Four states may be one too many
    for a swipe deck. Consider shipping Phase 1 with keep / discard / skip and
    measuring whether `maybe` is missed.
-5. **Should decisions sync between the iOS and macOS apps?** They point at the
-   same iCloud library, so a photo deleted on the phone is gone on the Mac — but
-   `pick` and `maybe` are Pickroom's own state and do not travel. A user who
-   culls on both will review the same photos twice. CloudKit would fix it and
-   brings conflict resolution with it. Proposal: do not build it; state plainly
-   in both apps that decisions are local; revisit if anyone complains.
-6. **How aggressive should failed-frame detection be?** It is the only category
-   that can propose deleting a photo with no sibling. Proposal: start
-   deliberately conservative and loosen only with real-library evidence.
