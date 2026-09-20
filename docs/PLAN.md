@@ -19,16 +19,55 @@ The second reason is the shape of the session. Mac culling is an hour at a desk.
 Phone culling is three minutes in a queue, one-handed, interrupted. Every design
 decision below follows from that difference.
 
-### Positioning
+### Positioning: taking out the garbage, not electing winners
 
-Pickroom is a tool for choosing your best photographs. That does not change on
-iOS. A full phone is *why* someone opens the app; picking keepers is *what* they
-do in it.
+The macOS app is a photographer picking keepers out of a shoot. This one is not
+that, and the difference runs through every screen.
 
-Grouping and best shot are **triage that accelerates the user's own decision**,
+Someone opening this app on a full phone is not curating a portfolio. They are
+looking for the shots that should never have been kept: the blurred ones, the
+eight near-identical frames where one would do, the screenshot of a parking
+space from 2024. The question they answer thousands of times is *does this
+deserve to stay*, not *is this my best work*.
+
+That decides what the app is allowed to assert. **"This frame is out of focus"
+is objective and the app can say it. "This is the better of these two smiles" is
+not, and it belongs to the user.** So every automatic judgement here points at
+the bottom of the pile, never the top — which is also the safer direction to be
+wrong in.
+
+Best shot still exists, but its name oversells it: it picks the thumbnail that
+represents a card, and its real value is the *other* end of the ranking, where
+frames are definitively bad. **The default action on a group is "remove what is
+clearly bad", not "keep one and discard the rest".** The app knows those eight
+are blurred. It does not know that the remaining six should be reduced to one —
+that is the user's call, offered as a secondary action and never taken
+automatically.
+
+Grouping and scoring are **triage that accelerates the user's own decision**,
 never a decision made for them. On a phone that acceleration is the entire
-product: without it, a fifty-thousand-photo library is not reviewable at all on
-a six-inch screen.
+product: without it a fifty-thousand-photo library is not reviewable at all on a
+six-inch screen.
+
+### First pass, not last
+
+Removing the failures leaves the good ones — both framings end at the same set.
+What differs is intent, and intent sets how certain the app must be before it
+acts.
+
+The workflow this is built for: **what Pickroom rejects gets deleted; what
+survives goes on to be worked on properly.** On the Mac that means Photoshop or
+Lightroom at 100% on a large screen. On a phone it means the photo simply stays,
+and gets edited or shared whenever it comes up. Either way the fine judgement —
+which of six good frames is the one — happens *after* Pickroom, with more
+information than Pickroom has.
+
+So the app's job ends at "this is clearly out", and everything else passes
+through. **A generous survivor set is correct here, not lazy.** Leaving six
+near-identical good frames costs the user almost nothing, and forcing a choice
+between them would mean deciding with less information than the next stage will
+have. The asymmetry is the whole design: be confident about removal, be generous
+about survival.
 
 ### Size is not the axis
 
@@ -161,8 +200,14 @@ are four such reasons, and none of them is size.
 
 ### 4.1 Redundancy
 
-Bursts and re-shoots of one composition. One frame is enough. Highest volume,
-and the reason grouping exists.
+Bursts and re-shoots of one composition. Highest volume, and the reason grouping
+exists.
+
+Note what the app claims here and what it does not. It can say *these eight of
+the fourteen are blurred or have someone blinking* — objective, and they go. It
+cannot say which of the remaining six is the keeper, so it does not: they all
+stay unless the user chooses to reduce further. Reducing a clean burst to one
+frame is offered, never assumed.
 
 ### 4.2 Failed frames
 
@@ -285,16 +330,22 @@ The deck serves **groups**, not loose photos, and this is the central idea:
 ```
 ┌─────────────────────────┐
 │                         │
-│      best shot          │   14 near-identical shots
-│      ★ sharpest         │
-│                         │   ← keep this one, discard 13
-│   ▫ ▫ ▪ ▫ ▫ ▫  +8       │   → keep all 14
+│      clean frame        │   14 shots · 8 blurred or blinking
+│                         │
+│                         │   ← discard the 8 bad ones
+│   ▫ ✕ ▫ ✕ ✕ ▫  +8       │   → keep all 14
 └─────────────────────────┘   ↑ decide later
 ```
 
-A burst of 14 is one card, not 14. The thumbnail strip is tappable to change the
-keeper before deciding. The header describes the situation — "14 near-identical
-shots", "312 screenshots from 2024" — and **does not lead with a size**.
+A burst of 14 is one card, not 14. The card leads with what the app is confident
+about — which frames are objectively bad — and those are the ones the primary
+gesture removes. **"Reduce to one" is a secondary action**, reachable by long
+press, because picking the single keeper out of several good frames is the
+user's judgement, not the app's.
+
+The thumbnail strip is tappable to change any frame's mark before deciding. The
+header describes the situation — "14 shots, 8 blurred", "312 screenshots from
+2024" — and **does not lead with a size**.
 
 A few hundred cards stand in for tens of thousands of photos. That is what makes
 the library tractable on a phone.
