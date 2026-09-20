@@ -1,0 +1,10 @@
+.DS_Store
+*.xcodeproj
+!*.xcodeproj/project.pbxproj
+xcuserdata/
+*.xcworkspace/xcuserdata/
+DerivedData/
+build/
+dist/
+.swiftpm/
+Packages/*/.build/
