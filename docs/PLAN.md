@@ -680,6 +680,16 @@ proposed for deletion, which is exactly what lets its threshold be generous: a
 false positive costs a swipe, not a photo. No bulk action on `probablyBad` at
 any threshold. Rationale in §4.2.
 
+**The deployment floor is roughly *current minus two*, which iOS 18 already
+satisfies.** iOS 27 is current and 18 shipped September 2024, two releases back
+(18 → 26 → 27). It gives `VNCalculateImageAestheticsScoresRequest` —
+`overallScore` and the `isUtility` flag — with no `#available` gating, which is
+the only version-dependent API this plan relies on. Nothing changes here.
+
+The macOS app is on the same policy and rises from 14 to 15 during its Phase 3,
+so both floors end up the same vintage. See
+[Pickroom#1](https://github.com/zjywill/Pickroom/issues/1).
+
 **Decisions do not sync between the iOS and macOS apps.** Both point at the same
 iCloud library, so deletions travel for free, but `pick` and `maybe` are
 Pickroom's own state and stay on the device that made them. Both apps say so
