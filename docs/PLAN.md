@@ -426,7 +426,7 @@ Pickroom-iOS/
 │       ├── Grouping/          # GroupEngine: time clustering, kinds, thresholds
 │       ├── Ranking/           # ShotRanker protocol + scorers
 │       ├── Quality/           # failed-frame detection (group-independent)
-│       └── Fingerprint/       # dHash, candidate selection
+│       └── Fingerprint/       # feature prints, candidate selection
 └── Pickroom/
     ├── App/
     ├── Library/               # PhotoKitLibrary, ImageCache, deletability
@@ -547,10 +547,11 @@ one-tap override that persists.
 
 ### Phase 4 — Near duplicates
 
-dHash behind a protocol, candidates drawn only from Stage A's time-adjacent
-sets, the floating threshold table, on-disk fingerprint cache keyed by
-`localIdentifier` + modification date, `BGProcessingTask` with thermal and power
-throttling.
+`VNGenerateImageFeaturePrintRequest` behind a protocol, candidates drawn only
+from Stage A's time-adjacent sets, the floating threshold table calibrated
+against real libraries, on-disk fingerprint cache keyed by `localIdentifier` +
+modification date + **request revision + crop-and-scale option**,
+`BGProcessingTask` with thermal and power throttling.
 
 ### Phase 5 — Review and parity
 
@@ -582,6 +583,8 @@ device.** The Simulator covers pure logic and UI layout, nothing more.
   fall back to identifier order.
 - Floating threshold: the same fingerprint distance groups at 2 s and does not at
   2 h.
+- **Revision guard:** a cached fingerprint recorded under a different request
+  revision or crop-and-scale option is discarded and recomputed, never compared.
 - Bracket guard: three frames at exposure bias −2/0/+2 within one second are
   `bracket` with a keep-all default, never a deletion prompt.
 - Versions guard: an original and its edit never form a deletion prompt.
@@ -680,6 +683,37 @@ proposed for deletion, which is exactly what lets its threshold be generous: a
 false positive costs a swipe, not a photo. No bulk action on `probablyBad` at
 any threshold. Rationale in §4.2.
 
+**Near-duplicate matching uses `VNGenerateImageFeaturePrintRequest`, not
+dHash.** The argument for dHash was cost, and the design removed it: Stage B
+fingerprints only time-adjacent candidates, which in a 50,000 asset library is a
+few thousand images, not fifty thousand.
+
+dHash is a pixel-layout hash — an 8×8 reduction compared on gradient direction.
+It is good at "same image, re-encoded", and weak at exactly what this app must
+judge: same composition, subject moved slightly. A burst frame where someone
+shifted their weight is semantically one photograph and can sit a long way away
+in Hamming distance. The failure mode is the silent one — groups that never
+appear, so the user concludes the app does not do much.
+
+Three costs that must be designed for:
+
+- **Revision pinning.** `VNGenerateImageFeaturePrintRequestRevision1` (iOS 13+)
+  and `Revision2` (iOS 17+) produce **incomparable** prints — the header lists
+  comparing non-comparable feature prints as an error case. The cache stores the
+  revision, and an OS upgrade can invalidate all of it. On a phone that means a
+  full recompute, so it must be schedulable through `BGProcessingTask` rather
+  than run in the foreground.
+- **`imageCropAndScaleOption` must be pinned** and included in the cache key.
+- **The threshold table's units change.** The shape survives — looser when close
+  in time, off entirely past an hour — but every number must be calibrated
+  against real libraries, not guessed.
+
+Cache entries grow from 8 bytes to a float vector, which stays affordable only
+because candidates are pre-narrowed by time — and on a device where the app's
+whole purpose is reclaiming storage, its own cache size is not a detail to wave
+past. Keep the descriptor behind a protocol for substitutability, not because a
+swap is planned; dHash is not being written.
+
 **The deployment floor is roughly *current minus two*, which iOS 18 already
 satisfies.** iOS 27 is current and 18 shipped September 2024, two releases back
 (18 → 26 → 27). It gives `VNCalculateImageAestheticsScoresRequest` —
@@ -702,10 +736,8 @@ Photos with no infrastructure at all (`PHAssetCollectionChangeRequest`).
 
 ## 12. Open questions
 
-1. **dHash or `VNGenerateImageFeaturePrintRequest`?** Proposal: dHash first —
-   fast, cheap on battery, good enough inside a time window — behind a protocol.
-2. **Share `PickroomCore` with the Mac app, or duplicate?** Proposal: write it
+1. **Share `PickroomCore` with the Mac app, or duplicate?** Proposal: write it
    shareable, duplicate for now, revisit after both ship.
-3. **Does `maybe` earn its place on a phone?** Four states may be one too many
+2. **Does `maybe` earn its place on a phone?** Four states may be one too many
    for a swipe deck. Consider shipping Phase 1 with keep / discard / skip and
    measuring whether `maybe` is missed.
