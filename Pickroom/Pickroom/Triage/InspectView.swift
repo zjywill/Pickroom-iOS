@@ -16,7 +16,7 @@ struct InspectView: View {
     @State private var lastOffset: CGSize = .zero
 
     var body: some View {
-        NavigationStack {
+        ZStack(alignment: .topTrailing) {
             Group {
                 if let image {
                     Image(uiImage: image)
@@ -68,16 +68,17 @@ struct InspectView: View {
                             }
                         }
                 } else {
-                    ProgressView()
+                    CampSpinner(color: Camp.cream)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // Photos are judged against neutral black, not the camp
+            // palette; only the control is themed.
             .background(.black)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done") { dismiss() }
-                }
-            }
+
+            CampBarButton(kind: .close) { dismiss() }
+                .padding(.horizontal, 16)
+                .padding(.top, 8)
         }
         .task {
             let identifier = String(assetKey.dropFirst("photos:".count))

@@ -29,12 +29,19 @@ struct DeckView: View {
             }
         }
         .background { MeadowBackground() }
-        .navigationTitle("Triage")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbarBackground(.hidden, for: .navigationBar)
+        .campNavigationBar(background: .clear) {
+            CampBackButtonIfPushed()
+        } center: {
+            if deck.currentCard != nil {
+                progressPill
+            }
+        } trailing: {
+            commitButton
+        }
         .sheet(isPresented: $showingCommit) {
             CommitSheet()
                 .environment(model)
+                .campSheet()
         }
         // Hardware keyboard (iPad): the same four decisions, same
         // rhythm, without the thumb. Phase 5 parity with the Mac app's
@@ -71,12 +78,9 @@ struct DeckView: View {
     @ViewBuilder
     private func cardStack(_ card: CardModel) -> some View {
         VStack(spacing: 0) {
-            topRow
-                .padding(.horizontal, 16)
-                .padding(.bottom, 12)
-
             cardHeader(card)
                 .padding(.horizontal, 24)
+                .padding(.top, 8)
 
             CardView(
                 card: card,
@@ -102,6 +106,7 @@ struct DeckView: View {
         .sheet(isPresented: $showingGroupSheet) {
             GroupSheet(groupID: card.id, deck: deck)
                 .environment(model)
+                .campSheet()
         }
         .task(id: card.id) {
             prefetchWindow()
@@ -110,55 +115,56 @@ struct DeckView: View {
         .shakeToUndo(deck: deck)
     }
 
-    /// Progress in sets, and the commit button carrying the marked
-    /// count — the only way out of triage that deletes anything.
-    private var topRow: some View {
-        HStack {
-            VStack(spacing: 6) {
-                Text(deck.progressText)
-                    .font(Camp.display(.subheadline, weight: .semibold))
-                    .foregroundStyle(Camp.ink)
-                    .monospacedDigit()
-                CampProgressBar(
-                    value: Double(deck.reviewedGroupCount) / Double(max(deck.totalCardCount, 1)),
-                    fill: Camp.keep,
-                    edge: Camp.keepEdge,
-                    height: 6
-                )
-                .frame(width: 96)
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 9)
-            .background(
-                Capsule()
-                    .fill(Camp.cream)
-                    .shadow(color: Camp.meadowEdge, radius: 0, x: 0, y: 4)
+    /// Progress in sets — never in gigabytes.
+    private var progressPill: some View {
+        VStack(spacing: 6) {
+            Text(deck.progressText)
+                .font(Camp.display(.subheadline, weight: .semibold))
+                .foregroundStyle(Camp.ink)
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+            CampProgressBar(
+                value: Double(deck.reviewedGroupCount) / Double(max(deck.totalCardCount, 1)),
+                fill: Camp.keep,
+                edge: Camp.keepEdge,
+                height: 6
             )
-
-            Spacer()
-
-            Button {
-                showingCommit = true
-            } label: {
-                Image(systemName: "trash.fill")
-            }
-            .buttonStyle(RoundChunkyButtonStyle(fill: Camp.toss, edge: Camp.tossEdge))
-            .overlay(alignment: .topTrailing) {
-                if !model.commitCandidates.isEmpty {
-                    Text(model.commitCandidates.count.formatted())
-                        .font(Camp.display(.caption, weight: .bold))
-                        .foregroundStyle(Camp.toss)
-                        .monospacedDigit()
-                        .padding(.horizontal, 6)
-                        .frame(minWidth: 22, minHeight: 22)
-                        .background(Capsule().fill(Camp.cream))
-                        .offset(x: 6, y: -6)
-                        .allowsHitTesting(false)
-                }
-            }
-            .disabled(model.commitCandidates.isEmpty)
-            .accessibilityLabel("Commit, \(model.commitCandidates.count) marked")
+            .frame(width: 96)
         }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 9)
+        .background(
+            Capsule()
+                .fill(Camp.cream)
+                .shadow(color: Camp.meadowEdge, radius: 0, x: 0, y: 4)
+        )
+    }
+
+    /// The commit button, carrying the marked count — the only way out
+    /// of triage that deletes anything.
+    private var commitButton: some View {
+        Button {
+            showingCommit = true
+        } label: {
+            Image(systemName: "trash.fill")
+        }
+        .buttonStyle(RoundChunkyButtonStyle(fill: Camp.toss, edge: Camp.tossEdge, size: 44))
+        .overlay(alignment: .topTrailing) {
+            if !model.commitCandidates.isEmpty {
+                Text(model.commitCandidates.count.formatted())
+                    .font(Camp.display(.caption, weight: .bold))
+                    .foregroundStyle(Camp.toss)
+                    .monospacedDigit()
+                    .padding(.horizontal, 6)
+                    .frame(minWidth: 22, minHeight: 22)
+                    .background(Capsule().fill(Camp.cream))
+                    .offset(x: 6, y: -6)
+                    .allowsHitTesting(false)
+            }
+        }
+        .disabled(model.commitCandidates.isEmpty)
+        .accessibilityLabel("Commit, \(model.commitCandidates.count) marked")
     }
 
     /// The situation headline — kind, what the app is sure of, and the

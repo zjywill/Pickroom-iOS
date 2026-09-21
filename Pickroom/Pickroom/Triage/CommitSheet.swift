@@ -17,27 +17,22 @@ struct CommitSheet: View {
     @State private var showReport = false
 
     var body: some View {
-        NavigationStack {
-            Group {
-                if model.commitCandidates.isEmpty {
-                    emptyState
-                } else {
-                    reviewContent
-                }
+        Group {
+            if model.commitCandidates.isEmpty {
+                emptyState
+            } else {
+                reviewContent
             }
-            .background(Camp.sheet)
-            .navigationTitle("Commit")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("Cancel") { dismiss() }
-                        .disabled(isCommitting)
-                }
-            }
+        }
+        .background(Camp.sheet)
+        .campNavigationBar("Commit", background: Camp.sheet, showsGrabber: true) {
+            CampBarButton(kind: .close, accessibilityLabel: "Cancel") { dismiss() }
+                .disabled(isCommitting)
         }
         .sheet(isPresented: $showReport) {
             ReportView()
                 .environment(model)
+                .campSheet()
         }
     }
 
@@ -127,11 +122,12 @@ struct CommitSheet: View {
             spacing: 12
         ) {
             ForEach(model.commitCandidates, id: \.self) { key in
+                // Touch and hold keeps the photo straight away — it
+                // leaves this grid, which is the confirmation.
                 RejectThumb(assetKey: key)
-                    .contextMenu {
-                        Button("Keep this photo", systemImage: "arrow.uturn.backward") {
-                            model.deck?.unmark(key: key)
-                        }
+                    .onLongPressGesture(minimumDuration: 0.4) {
+                        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                        withAnimation(.snappy) { model.deck?.unmark(key: key) }
                     }
                     .accessibilityAction(named: "Keep this photo") {
                         model.deck?.unmark(key: key)
@@ -146,8 +142,7 @@ struct CommitSheet: View {
         } label: {
             Group {
                 if isCommitting {
-                    ProgressView()
-                        .tint(.white)
+                    CampSpinner(color: .white)
                 } else {
                     Label(
                         CommitComposer.headline(
@@ -228,71 +223,67 @@ struct ReportView: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    if let report = model.lastCommitReport {
-                        VStack(spacing: 10) {
-                            Raccoon(mood: .content)
-                                .frame(width: 96)
-                            Text("\(report.deletedCount.formatted()) photos deleted")
-                                .font(Camp.display(.title, weight: .semibold))
-                                .foregroundStyle(Camp.ink)
-                            Label(
-                                "Moved to Recently Deleted — erased after 30 days",
-                                systemImage: "clock.badge.checkmark"
-                            )
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(Camp.muted)
-                        }
-                        .multilineTextAlignment(.center)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 8)
-
-                        VStack(alignment: .leading, spacing: 12) {
-                            CampTag(text: "Space")
-                            storageRow(report)
-                            if report.storageBefore.totalCapacity > 0 {
-                                // The device storage bar the user already
-                                // has an intuition for.
-                                StorageBar(
-                                    available: report.storageBefore.availableCapacity,
-                                    total: report.storageBefore.totalCapacity
-                                )
-                            }
-                        }
-                        .campPanel(padding: 18)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                if let report = model.lastCommitReport {
+                    VStack(spacing: 10) {
+                        Raccoon(mood: .content)
+                            .frame(width: 96)
+                        Text("\(report.deletedCount.formatted()) photos deleted")
+                            .font(Camp.display(.title, weight: .semibold))
+                            .foregroundStyle(Camp.ink)
+                        Label(
+                            "Moved to Recently Deleted — erased after 30 days",
+                            systemImage: "clock.badge.checkmark"
+                        )
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Camp.muted)
                     }
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
 
-                    VStack(alignment: .leading, spacing: 10) {
-                        HStack(spacing: 12) {
-                            IconBadge(systemImage: "trash.fill", fill: Camp.wood, size: 36)
-                            Text("\(model.recentlyDeletedPending.formatted()) photos pending in Recently Deleted")
-                                .font(.subheadline.weight(.heavy))
-                                .foregroundStyle(Camp.ink)
+                    VStack(alignment: .leading, spacing: 12) {
+                        CampTag(text: "Space")
+                        storageRow(report)
+                        if report.storageBefore.totalCapacity > 0 {
+                            // The device storage bar the user already
+                            // has an intuition for.
+                            StorageBar(
+                                available: report.storageBefore.availableCapacity,
+                                total: report.storageBefore.totalCapacity
+                            )
                         }
-                        Text("Space is not freed until Recently Deleted is emptied. Pickroom will never empty it for you — that step is yours, in the Photos app.")
-                            .font(.footnote)
-                            .foregroundStyle(Camp.muted)
-                        Link(destination: URL(string: "photos-redirect://")!) {
-                            Label("Open Photos", systemImage: "arrow.up.right")
-                                .frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(.wood)
-                        .padding(.top, 4)
                     }
                     .campPanel(padding: 18)
                 }
-                .padding(20)
-            }
-            .background(Camp.sheet)
-            .navigationTitle("Session report")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done") { dismiss() }
+
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 12) {
+                        IconBadge(systemImage: "trash.fill", fill: Camp.wood, size: 36)
+                        Text("\(model.recentlyDeletedPending.formatted()) photos pending in Recently Deleted")
+                            .font(.subheadline.weight(.heavy))
+                            .foregroundStyle(Camp.ink)
+                    }
+                    Text("Space is not freed until Recently Deleted is emptied. Pickroom will never empty it for you — that step is yours, in the Photos app.")
+                        .font(.footnote)
+                        .foregroundStyle(Camp.muted)
+                    Link(destination: URL(string: "photos-redirect://")!) {
+                        Label("Open Photos", systemImage: "arrow.up.right")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.wood)
+                    .padding(.top, 4)
                 }
+                .campPanel(padding: 18)
             }
+            .padding(20)
+        }
+        .background(Camp.sheet)
+        .campNavigationBar("Session report", background: Camp.sheet, showsGrabber: true) {
+            EmptyView()
+        } trailing: {
+            CampBarButton(kind: .done) { dismiss() }
         }
     }
 

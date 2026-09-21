@@ -19,6 +19,7 @@ struct ReviewView: View {
     }
 
     @State private var filter: Filter = .sets
+    @State private var ignoring: PhotoGroup?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -35,58 +36,89 @@ struct ReviewView: View {
             }
         }
         .background(Camp.paper)
-        .navigationTitle("Review")
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                NavigationLink {
-                    if let deck = model.deck {
-                        DeckView(deck: deck)
-                    } else {
-                        EmptyView()
+        .campDialog(
+            isPresented: Binding(
+                get: { ignoring != nil },
+                set: { if !$0 { ignoring = nil } }
+            ),
+            title: "Ignore this set for good?",
+            message: "It won't come back in the deck. Nothing is deleted — the photos stay in your library.",
+            actions: [
+                // Capture the set now: closing the dialog clears
+                // `ignoring` before the action runs.
+                CampDialogAction(title: "Ignore set", role: .destructive) { [ignoring] in
+                    if let id = ignoring?.id {
+                        Task { await model.dismissGroup(id: id) }
                     }
-                } label: {
-                    Label("Triage", systemImage: "rectangle.stack")
+                },
+                .cancel(),
+            ]
+        )
+        .campNavigationBar("Review") {
+            EmptyView()
+        } trailing: {
+            NavigationLink {
+                if let deck = model.deck {
+                    DeckView(deck: deck)
+                } else {
+                    CampLoadingView(message: "Loading your library…")
                 }
+            } label: {
+                Image(systemName: "rectangle.stack.fill")
             }
+            .buttonStyle(RoundChunkyButtonStyle(fill: Camp.keep, edge: Camp.keepEdge, size: 44))
+            .accessibilityLabel("Triage")
         }
     }
 
     // MARK: - Sets
 
-    /// The group list, cheapest decision first, with kind chips.
+    /// The group list, cheapest decision first, with kind chips. Each
+    /// row opens the set; pending sets carry their own ignore button.
     private var setsList: some View {
-        List {
-            Section {
-                ForEach(model.groups) { group in
-                    NavigationLink {
-                        GroupDetailView(group: group)
-                    } label: {
-                        SetRow(group: group)
-                    }
-                    .listRowBackground(
-                        RoundedRectangle(cornerRadius: 18, style: .continuous)
-                            .fill(Camp.cream)
-                            .padding(.vertical, 1)
-                    )
-                    .listRowSeparator(.hidden)
-                    .swipeActions {
-                        if group.state == .pending {
-                            Button("Ignore") {
-                                Task { await model.dismissGroup(id: group.id) }
-                            }
-                            .tint(Camp.stone)
-                        }
-                    }
-                }
-            } header: {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 12) {
                 Text("Cheapest decision first")
                     .font(Camp.display(.subheadline, weight: .semibold))
                     .foregroundStyle(Camp.muted)
-                    .textCase(nil)
+                    .padding(.horizontal, 4)
+
+                ForEach(model.groups) { group in
+                    HStack(spacing: 10) {
+                        NavigationLink {
+                            GroupDetailView(group: group)
+                        } label: {
+                            HStack(spacing: 10) {
+                                SetRow(group: group)
+                                Image(systemName: "chevron.right")
+                                    .font(.footnote.weight(.heavy))
+                                    .foregroundStyle(Camp.panelEdge)
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+
+                        if group.state == .pending {
+                            Button {
+                                ignoring = group
+                            } label: {
+                                Image(systemName: "eye.slash.fill")
+                            }
+                            .buttonStyle(RoundChunkyButtonStyle(
+                                fill: Camp.sand,
+                                edge: Camp.panelEdge,
+                                foreground: Camp.muted,
+                                size: 38
+                            ))
+                            .accessibilityLabel("Ignore this set")
+                        }
+                    }
+                    .campPanel(cornerRadius: 18, padding: 14)
+                }
             }
+            .padding(.horizontal)
+            .padding(.bottom, 24)
         }
-        .listRowSpacing(10)
-        .scrollContentBackground(.hidden)
     }
 
     // MARK: - Picks
@@ -129,37 +161,35 @@ struct ReviewView: View {
     /// grouping, no best shot, no deletion proposals. Viewing happens
     /// in Photos.
     private var videoList: some View {
-        List {
-            Section {
-                let videos = model.records.filter(\.isContainedVideo)
+        let videos = model.records.filter(\.isContainedVideo)
+        return ScrollView {
+            LazyVStack(alignment: .leading, spacing: 12) {
                 if videos.isEmpty {
-                    Text("No videos.")
-                        .foregroundStyle(Camp.muted)
-                        .listRowBackground(Camp.cream)
+                    emptyText("No videos.")
                 }
                 ForEach(videos) { record in
                     HStack {
                         AssetRow(record: record)
                         Spacer()
-                        Link(
-                            "Photos",
-                            destination: URL(string: "photos-redirect://")!
-                        )
-                        .font(.caption.weight(.heavy))
+                        Link(destination: URL(string: "photos-redirect://")!) {
+                            Text("Photos")
+                        }
+                        .buttonStyle(ChunkyButtonStyle(
+                            fill: Camp.wood,
+                            edge: Camp.woodEdge,
+                            cornerRadius: 14,
+                            font: .caption.weight(.heavy),
+                            horizontalPadding: 12,
+                            verticalPadding: 7
+                        ))
                     }
-                    .listRowBackground(Camp.cream)
+                    .campPanel(cornerRadius: 18, padding: 12)
                 }
-            } header: {
-                Text("Video")
-                    .font(Camp.display(.subheadline, weight: .semibold))
-                    .foregroundStyle(Camp.muted)
-                    .textCase(nil)
-            } footer: {
-                Text("A poster frame tells you almost nothing about a video, so Pickroom never judges one. Screen recordings are the exception — they live with expired screenshots.")
-                    .foregroundStyle(Camp.muted)
+                footnote("A poster frame tells you almost nothing about a video, so Pickroom never judges one. Screen recordings are the exception — they live with expired screenshots.")
             }
+            .padding(.horizontal)
+            .padding(.bottom, 24)
         }
-        .scrollContentBackground(.hidden)
     }
 
     private func emptyText(_ text: String) -> some View {
@@ -240,11 +270,11 @@ private struct PhotoGrid: View {
                     isFlagged: flagged.contains(key)
                 )
                 if let unmark, decisionFor(key) == .reject {
+                    // Touch and hold keeps the photo straight away.
                     cell
-                        .contextMenu {
-                            Button("Keep this photo", systemImage: "arrow.uturn.backward") {
-                                unmark(key)
-                            }
+                        .onLongPressGesture(minimumDuration: 0.4) {
+                            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                            withAnimation(.snappy) { unmark(key) }
                         }
                         .accessibilityAction(named: "Keep this photo") { unmark(key) }
                 } else {
@@ -369,6 +399,7 @@ private struct AssetRow: View {
 /// the user's decisions. Marked members can be kept from here.
 private struct GroupDetailView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
     let group: PhotoGroup
 
     var body: some View {
@@ -400,7 +431,8 @@ private struct GroupDetailView: View {
             .padding()
         }
         .background(Camp.paper)
-        .navigationTitle(group.kind.title)
-        .navigationBarTitleDisplayMode(.inline)
+        .campNavigationBar(group.kind.title) {
+            CampBarButton(kind: .back) { dismiss() }
+        }
     }
 }

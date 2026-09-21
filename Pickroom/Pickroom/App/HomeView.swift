@@ -9,6 +9,7 @@ import PickroomCore
 /// its own.
 struct HomeView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.scenePhase) private var scenePhase
     @State private var scrolledPastHeader = false
 
     var body: some View {
@@ -27,6 +28,7 @@ struct HomeView: View {
                 .padding(.bottom, 32)
             }
         }
+        .campTabBarSpace()
         .background(Camp.paper)
         .ignoresSafeArea(edges: .top)
         // Once the scene has scrolled away, paper over the status bar
@@ -43,8 +45,14 @@ struct HomeView: View {
                 .opacity(scrolledPastHeader ? 1 : 0)
         }
         .toolbar(.hidden, for: .navigationBar)
-        .refreshable {
+        // Refresh the Recently Deleted figure on appear and on return
+        // from Photos, rather than behind a pull-to-refresh spinner.
+        .task {
             await model.refreshPendingFigure()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            guard phase == .active else { return }
+            Task { await model.refreshPendingFigure() }
         }
     }
 
@@ -95,8 +103,7 @@ struct HomeView: View {
                 .foregroundStyle(Camp.keep)
             }
 
-            Divider()
-                .overlay(Camp.panelEdge)
+            DashedDivider()
             Text("With iCloud Photos on there is one library: deleting here deletes everywhere, and Recently Deleted syncs too. There is no remove-from-this-phone-only.")
                 .font(.footnote)
                 .foregroundStyle(Camp.muted)
@@ -110,8 +117,7 @@ struct HomeView: View {
                 if let deck = model.deck {
                     DeckView(deck: deck)
                 } else {
-                    ProgressView("Loading your library…")
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    CampLoadingView(message: "Loading your library…")
                 }
             } label: {
                 HStack(spacing: 14) {

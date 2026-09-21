@@ -64,8 +64,7 @@ struct CardView: View {
                     .resizable()
                     .scaledToFit()
             } else {
-                ProgressView()
-                    .tint(Camp.muted)
+                CampSpinner()
             }
         }
     }

@@ -8,6 +8,8 @@ import PickroomCore
 struct RootView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.scenePhase) private var scenePhase
+    @State private var tab: RootTab = .home
+    @State private var tabBarHeight: CGFloat = 80
 
     var body: some View {
         Group {
@@ -37,52 +39,74 @@ struct RootView: View {
         }
     }
 
+    /// The system tab bar is hidden; the camp bar floats over the tabs
+    /// and publishes its height so each screen keeps content clear.
     private var tabContent: some View {
-        TabView {
+        TabView(selection: $tab) {
             NavigationStack {
                 HomeView()
             }
-            .tabItem {
-                Label("Home", systemImage: "house")
-            }
+            .toolbar(.hidden, for: .tabBar)
+            .tag(RootTab.home)
 
             NavigationStack {
-                if let deck = model.deck {
-                    DeckView(deck: deck)
-                } else {
-                    ProgressView("Loading your library…")
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
+                deckDestination
             }
-            .tabItem {
-                Label("Triage", systemImage: "rectangle.stack")
-            }
+            .toolbar(.hidden, for: .tabBar)
+            .tag(RootTab.triage)
 
             NavigationStack {
                 ReviewView()
             }
-            .tabItem {
-                Label("Review", systemImage: "square.grid.2x2")
-            }
+            .toolbar(.hidden, for: .tabBar)
+            .tag(RootTab.review)
+        }
+        .environment(\.campTabBarInset, tabBarHeight)
+        .overlay(alignment: .bottom) {
+            CampTabBar(selection: $tab)
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { tabBarHeight = $0 }
         }
     }
 
+    /// iPad: the same three places as a camp sidebar of wood blocks.
     private var sidebarContent: some View {
         NavigationSplitView {
-            List {
-                NavigationLink(destination: HomeView()) {
-                    Label("Home", systemImage: "house")
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Pickroom")
+                    .font(Camp.display(.largeTitle, weight: .bold))
+                    .foregroundStyle(Camp.ink)
+                    .padding(.bottom, 12)
+                    .accessibilityAddTraits(.isHeader)
+                ForEach(RootTab.allCases, id: \.self) { item in
+                    Button {
+                        tab = item
+                    } label: {
+                        Label(item.title, systemImage: item.symbol)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .buttonStyle(ChunkyButtonStyle(
+                        fill: item == tab ? Camp.wood : Camp.cream,
+                        edge: item == tab ? Camp.woodEdge : Camp.panelEdge,
+                        foreground: item == tab ? .white : Camp.ink
+                    ))
+                    .accessibilityAddTraits(item == tab ? .isSelected : [])
                 }
-                NavigationLink(destination: deckDestination) {
-                    Label("Triage", systemImage: "rectangle.stack")
-                }
-                NavigationLink(destination: ReviewView()) {
-                    Label("Review", systemImage: "square.grid.2x2")
+                Spacer()
+            }
+            .padding(20)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .background(Camp.paper)
+            .toolbar(.hidden, for: .navigationBar)
+            .toolbar(removing: .sidebarToggle)
+        } detail: {
+            NavigationStack {
+                switch tab {
+                case .home: HomeView()
+                case .triage: deckDestination
+                case .review: ReviewView()
                 }
             }
-            .navigationTitle("Pickroom")
-        } detail: {
-            HomeView()
+            .id(tab)
         }
     }
 
@@ -91,8 +115,7 @@ struct RootView: View {
         if let deck = model.deck {
             DeckView(deck: deck)
         } else {
-            ProgressView("Loading your library…")
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            CampLoadingView(message: "Loading your library…")
         }
     }
 }
