@@ -2,12 +2,10 @@ import SwiftUI
 import Photos
 import PickroomCore
 
-/// One card: the representative photo, the situation headline, the
-/// member strip with tappable marks, and the gesture affordances.
-///
-/// The card leads with what the app is confident about — the headline
-/// describes the situation ("14 shots · 8 blurred") and never leads
-/// with a size.
+/// One card: the representative photo in a polaroid frame, the member
+/// strip with tappable marks, and the gesture stamps. The situation
+/// headline ("14 shots · 8 blurred" — never a size) sits above the
+/// card in `DeckView`, off the photo.
 struct CardView: View {
     @Environment(AppModel.self) private var model
     let card: CardModel
@@ -24,19 +22,27 @@ struct CardView: View {
     var body: some View {
         GeometryReader { geometry in
             let size = geometry.size
-            ZStack(alignment: .bottom) {
+            VStack(spacing: 12) {
                 photo
-                    .frame(width: size.width, height: size.height)
-                    .clipShape(RoundedRectangle(cornerRadius: 24))
-                    .overlay(alignment: .top) { headline }
-                    .overlay(alignment: .bottom) { strip }
-
-                gestureIndicators(size: size)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Camp.sand)
+                    .clipShape(RoundedRectangle(cornerRadius: 17, style: .continuous))
+                    .overlay(alignment: .topLeading) { suggestedBadge }
+                    .overlay { gestureStamps }
+                strip
             }
+            .padding(12)
+            .frame(width: size.width, height: size.height)
+            .background(
+                RoundedRectangle(cornerRadius: 26, style: .continuous)
+                    .fill(Camp.cream)
+                    .shadow(color: Color(red: 44 / 255, green: 78 / 255, blue: 36 / 255).opacity(0.32), radius: 0, x: 0, y: 9)
+            )
+            .rotationEffect(.degrees(-1.5))
             .offset(x: dragOffset.width, y: dragOffset.height)
             .rotationEffect(.degrees(Double(dragOffset.width) / 24))
             .opacity(1 - min(abs(dragOffset.height) / 800, 0.35))
-            .contentShape(RoundedRectangle(cornerRadius: 24))
+            .contentShape(RoundedRectangle(cornerRadius: 26))
             .gesture(dragGesture(threshold: 120))
             .onTapGesture(perform: onTap)
             .onLongPressGesture(minimumDuration: 0.35, perform: onLongPress)
@@ -58,45 +64,29 @@ struct CardView: View {
                     .resizable()
                     .scaledToFit()
             } else {
-                Rectangle()
-                    .fill(.quaternary)
-                    .overlay {
-                        ProgressView()
-                    }
+                ProgressView()
+                    .tint(Camp.muted)
             }
         }
     }
 
-    private var headline: some View {
-        VStack(spacing: 2) {
-            Text(card.group.kind.title.uppercased())
-                .font(.caption2.bold())
-                .foregroundStyle(.white.opacity(0.8))
-            Text(card.group.headline)
-                .font(.headline)
+    /// Shown when the photo on the card is the one the ranking would
+    /// keep — so the strip's green tick and the big photo agree.
+    @ViewBuilder
+    private var suggestedBadge: some View {
+        if !keepAll, keeperKey == card.group.representativeKey, card.group.memberKeys.count > 1 {
+            Label("Suggested", systemImage: "checkmark")
+                .font(Camp.display(.subheadline, weight: .semibold))
                 .foregroundStyle(.white)
-                .shadow(radius: 4)
-                .multilineTextAlignment(.center)
-            if let suggestion = card.suggestion, !suggestion.reasons.isEmpty {
-                Text("Suggested: \(suggestion.reasons.joined(separator: " · "))")
-                    .font(.caption)
-                    .foregroundStyle(.white.opacity(0.75))
-            }
-            if card.group.kind == .failedFrame && card.group.flaggedKeys.isEmpty {
-                Text("Your call — nothing is proposed automatically")
-                    .font(.caption2)
-                    .foregroundStyle(.white.opacity(0.7))
-            }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Camp.keep)
+                        .shadow(color: Camp.keepEdge, radius: 0, x: 0, y: 3)
+                )
+                .padding(10)
         }
-        .padding(12)
-        .frame(maxWidth: .infinity)
-        .background(
-            LinearGradient(
-                colors: [.black.opacity(0.6), .clear],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-        )
     }
 
     /// The thumbnail strip: tappable to change any frame's mark before
@@ -104,7 +94,7 @@ struct CardView: View {
     /// checkmark.
     private var strip: some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 6) {
+            HStack(spacing: 9) {
                 ForEach(card.group.memberKeys, id: \.self) { key in
                     MemberThumb(
                         assetKey: key,
@@ -114,17 +104,10 @@ struct CardView: View {
                     )
                 }
             }
-            .padding(.horizontal, 12)
-            .padding(.bottom, 12)
+            .padding(.horizontal, 4)
+            .padding(.vertical, 6)
         }
-        .frame(height: 92)
-        .background(
-            LinearGradient(
-                colors: [.clear, .black.opacity(0.6)],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-        )
+        .frame(height: 64)
     }
 
     private var keeperKey: String? {
@@ -141,48 +124,47 @@ struct CardView: View {
         return card.markedKeys.filter { deck.decisions[$0] != .pick }.count
     }
 
-    /// Swipe affordances, fading in with the drag.
+    /// Swipe affordances: a stamp on the photo that fades in with the
+    /// drag and names exactly what letting go will do.
     @ViewBuilder
-    private func gestureIndicators(size: CGSize) -> some View {
-        if dragOffset.width > 24 {
-            indicator(
-                title: "Keep all",
-                systemImage: "checkmark",
-                tint: .green
-            )
-            .position(x: size.width - 48, y: size.height * 0.4)
-            .opacity(min(dragOffset.width / 120, 1))
+    private var gestureStamps: some View {
+        ZStack {
+            if dragOffset.width > 24 {
+                stamp(keepAll || card.group.memberKeys.count == 1 ? "KEEP" : "KEEP ALL", systemImage: "checkmark", tint: Camp.keep)
+                    .rotationEffect(.degrees(-10))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .opacity(min(dragOffset.width / 120, 1))
+            }
+            if dragOffset.width < -24 && discardCount > 0 {
+                stamp("TOSS \(discardCount)", systemImage: "trash", tint: Camp.toss)
+                    .rotationEffect(.degrees(10))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                    .opacity(min(-dragOffset.width / 120, 1))
+            }
+            if dragOffset.height < -24 {
+                stamp("LATER", systemImage: "clock", tint: Camp.laterEdge)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                    .opacity(min(-dragOffset.height / 120, 1))
+            }
         }
-        if dragOffset.width < -24 && discardCount > 0 {
-            indicator(
-                title: "Discard \(discardCount)",
-                systemImage: "xmark",
-                tint: .red
-            )
-            .position(x: 48, y: size.height * 0.4)
-            .opacity(min(-dragOffset.width / 120, 1))
-        }
-        if dragOffset.height < -24 {
-            indicator(
-                title: "Later",
-                systemImage: "clock",
-                tint: .orange
-            )
-            .position(x: size.width / 2, y: 40)
-            .opacity(min(-dragOffset.height / 120, 1))
-        }
+        .padding(18)
+        .allowsHitTesting(false)
     }
 
-    private func indicator(title: String, systemImage: String, tint: Color) -> some View {
-        VStack(spacing: 4) {
-            Image(systemName: systemImage)
-                .font(.title2.bold())
-            Text(title)
-                .font(.caption.bold())
-        }
-        .foregroundStyle(tint)
-        .padding(10)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+    private func stamp(_ title: String, systemImage: String, tint: Color) -> some View {
+        Label(title, systemImage: systemImage)
+            .font(.system(size: 28, weight: .bold, design: .rounded))
+            .foregroundStyle(tint)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(Camp.cream.opacity(0.94))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .strokeBorder(tint, lineWidth: 4)
+            )
     }
 
     // MARK: - Gesture
@@ -232,43 +214,46 @@ private struct MemberThumb: View {
     @State private var image: UIImage?
 
     var body: some View {
-        ZStack(alignment: .bottomTrailing) {
-            Group {
-                if let image {
-                    Image(uiImage: image)
-                        .resizable()
-                        .scaledToFill()
-                } else {
-                    Rectangle().fill(.quaternary)
-                }
-            }
-            .frame(width: 72, height: 72)
-            .clipShape(RoundedRectangle(cornerRadius: 8))
-
-            if isMarked {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.title3)
-                    .foregroundStyle(.white, .red)
-                    .padding(4)
-            } else if isKeeper {
-                Image(systemName: "checkmark.circle.fill")
-                    .font(.title3)
-                    .foregroundStyle(.white, .green)
-                    .padding(4)
+        Group {
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                Rectangle().fill(Camp.sand)
             }
         }
+        .frame(width: 50, height: 50)
+        .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 8)
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
                 .strokeBorder(
-                    isMarked ? Color.red : (isKeeper ? Color.green : .clear),
-                    lineWidth: 2
+                    isMarked ? Camp.toss : (isKeeper ? Camp.keep : .clear),
+                    lineWidth: 3
                 )
         )
+        .overlay(alignment: .bottomTrailing) {
+            if isMarked {
+                markBadge("xmark", fill: Camp.toss)
+            } else if isKeeper {
+                markBadge("checkmark", fill: Camp.keep)
+            }
+        }
         .onTapGesture(perform: onTap)
         .task(id: assetKey) {
             let identifier = String(assetKey.dropFirst("photos:".count))
             image = await model.imageProvider.thumbnail(for: identifier)
         }
         .accessibilityLabel(isMarked ? "Marked for deletion" : "Keeping")
+    }
+
+    private func markBadge(_ systemImage: String, fill: Color) -> some View {
+        Image(systemName: systemImage)
+            .font(.system(size: 11, weight: .black))
+            .foregroundStyle(.white)
+            .frame(width: 22, height: 22)
+            .background(Circle().fill(fill))
+            .overlay(Circle().strokeBorder(Camp.cream, lineWidth: 2))
+            .offset(x: 5, y: 5)
     }
 }

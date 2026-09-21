@@ -28,18 +28,10 @@ struct DeckView: View {
                 finishedView
             }
         }
+        .background { MeadowBackground() }
         .navigationTitle("Triage")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Button {
-                    showingCommit = true
-                } label: {
-                    Label("Commit", systemImage: "trash")
-                }
-                .disabled(model.commitCandidates.isEmpty)
-            }
-        }
+        .toolbarBackground(.hidden, for: .navigationBar)
         .sheet(isPresented: $showingCommit) {
             CommitSheet()
                 .environment(model)
@@ -79,8 +71,12 @@ struct DeckView: View {
     @ViewBuilder
     private func cardStack(_ card: CardModel) -> some View {
         VStack(spacing: 0) {
-            progressHeader
-            Spacer(minLength: 8)
+            topRow
+                .padding(.horizontal, 16)
+                .padding(.bottom, 12)
+
+            cardHeader(card)
+                .padding(.horizontal, 24)
 
             CardView(
                 card: card,
@@ -90,10 +86,14 @@ struct DeckView: View {
                 onTap: { inspecting = InspectTarget(assetKey: card.group.representativeKey) },
                 onLongPress: { showingGroupSheet = true }
             )
-            .padding(.horizontal)
+            .padding(.horizontal, 28)
+            .zIndex(1)
 
-            Spacer(minLength: 8)
+            Spacer(minLength: 12)
+            swipeHints(card)
+            Spacer(minLength: 12)
             footer
+                .padding(.horizontal, 16)
         }
         .fullScreenCover(item: $inspecting) { target in
             InspectView(assetKey: target.assetKey)
@@ -110,25 +110,113 @@ struct DeckView: View {
         .shakeToUndo(deck: deck)
     }
 
-    private var progressHeader: some View {
-        VStack(spacing: 4) {
-            Text(deck.progressText)
-                .font(.subheadline.monospacedDigit())
-                .foregroundStyle(.secondary)
-            if let suggestion = deck.currentCard?.suggestion,
-               !suggestion.reasons.isEmpty {
-                Text(suggestion.reasons.joined(separator: " · "))
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
+    /// Progress in sets, and the commit button carrying the marked
+    /// count — the only way out of triage that deletes anything.
+    private var topRow: some View {
+        HStack {
+            VStack(spacing: 6) {
+                Text(deck.progressText)
+                    .font(Camp.display(.subheadline, weight: .semibold))
+                    .foregroundStyle(Camp.ink)
+                    .monospacedDigit()
+                CampProgressBar(
+                    value: Double(deck.reviewedGroupCount) / Double(max(deck.totalCardCount, 1)),
+                    fill: Camp.keep,
+                    edge: Camp.keepEdge,
+                    height: 6
+                )
+                .frame(width: 96)
             }
-            if UIDevice.current.userInterfaceIdiom == .pad {
-                Text("Keyboard: → keep · ← discard · ↑ later · Space inspect · ⌘Z undo")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 9)
+            .background(
+                Capsule()
+                    .fill(Camp.cream)
+                    .shadow(color: Camp.meadowEdge, radius: 0, x: 0, y: 4)
+            )
+
+            Spacer()
+
+            Button {
+                showingCommit = true
+            } label: {
+                Image(systemName: "trash.fill")
+                    .foregroundStyle(.white)
             }
+            .buttonStyle(RoundChunkyButtonStyle(fill: Camp.toss, edge: Camp.tossEdge))
+            .overlay(alignment: .topTrailing) {
+                if !model.commitCandidates.isEmpty {
+                    Text(model.commitCandidates.count.formatted())
+                        .font(Camp.display(.caption, weight: .bold))
+                        .foregroundStyle(Camp.toss)
+                        .monospacedDigit()
+                        .padding(.horizontal, 6)
+                        .frame(minWidth: 22, minHeight: 22)
+                        .background(Capsule().fill(Camp.cream))
+                        .offset(x: 6, y: -6)
+                        .allowsHitTesting(false)
+                }
+            }
+            .disabled(model.commitCandidates.isEmpty)
+            .accessibilityLabel("Commit, \(model.commitCandidates.count) marked")
         }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 8)
+    }
+
+    /// The situation headline — kind, what the app is sure of, and the
+    /// suggestion's reasons — with the raccoon peeking over the card.
+    private func cardHeader(_ card: CardModel) -> some View {
+        HStack(alignment: .bottom, spacing: 8) {
+            VStack(alignment: .leading, spacing: 7) {
+                CampTag(text: card.group.kind.title)
+                Text(card.group.headline)
+                    .font(Camp.display(.title2, weight: .semibold))
+                    .foregroundStyle(Camp.forestInk)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let suggestion = card.suggestion, !suggestion.reasons.isEmpty {
+                    Text("Suggested: \(suggestion.reasons.joined(separator: " · "))")
+                        .font(.footnote.weight(.bold))
+                        .foregroundStyle(Camp.mossInk)
+                }
+                if card.group.kind == .failedFrame && card.group.flaggedKeys.isEmpty {
+                    Text("Your call — nothing is proposed automatically")
+                        .font(.footnote.weight(.bold))
+                        .foregroundStyle(Camp.mossInk)
+                }
+                if UIDevice.current.userInterfaceIdiom == .pad {
+                    Text("Keyboard: → keep · ← discard · ↑ later · Space inspect · ⌘Z undo")
+                        .font(.caption2)
+                        .foregroundStyle(Camp.mossInk)
+                }
+            }
+            .padding(.bottom, 14)
+            Spacer(minLength: 0)
+            Raccoon(mood: dragOffset.width < -24 ? .oops : .watching)
+                .frame(width: 80)
+                .offset(x: -18, y: 16)
+                .animation(.snappy, value: dragOffset.width < -24)
+        }
+    }
+
+    /// Standing reminder of the three directions, in decision colours.
+    private func swipeHints(_ card: CardModel) -> some View {
+        HStack {
+            hint("Toss", systemImage: "arrow.left", color: Camp.toss)
+            Spacer()
+            hint("Later", systemImage: "arrow.up", color: Camp.laterInk)
+            Spacer()
+            hint(card.group.kind.defaultsToKeepAll || card.group.memberKeys.count == 1 ? "Keep" : "Keep all", systemImage: "arrow.right", color: Camp.keep)
+        }
+        .padding(.horizontal, 16)
+        .accessibilityHidden(true)
+    }
+
+    private func hint(_ title: String, systemImage: String, color: Color) -> some View {
+        Label(title, systemImage: systemImage)
+            .font(Camp.display(.subheadline, weight: .semibold))
+            .foregroundStyle(color)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background(Capsule().fill(Camp.cream.opacity(0.75)))
     }
 
     private var footer: some View {
@@ -138,10 +226,8 @@ struct DeckView: View {
                 deck.undo()
             } label: {
                 Label("Undo", systemImage: "arrow.uturn.backward")
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
-                    .background(.ultraThinMaterial, in: Capsule())
             }
+            .buttonStyle(ChunkyButtonStyle(fill: Camp.wood, edge: Camp.woodEdge, horizontalPadding: 16, verticalPadding: 11))
             .disabled(!deck.canUndo)
             .accessibilityLabel("Undo last decision")
 
@@ -149,8 +235,12 @@ struct DeckView: View {
 
             if let card = deck.currentCard, !card.markedKeys.isEmpty {
                 Text("\(card.markedKeys.count) marked")
-                    .font(.footnote.monospacedDigit())
-                    .foregroundStyle(.secondary)
+                    .font(.subheadline.weight(.heavy))
+                    .foregroundStyle(Camp.toss)
+                    .monospacedDigit()
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 7)
+                    .background(Capsule().fill(Camp.cream.opacity(0.85)))
             }
 
             Spacer()
@@ -159,34 +249,74 @@ struct DeckView: View {
                 deck.decideLater()
             } label: {
                 Label("Later", systemImage: "clock.arrow.circlepath")
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
-                    .background(.ultraThinMaterial, in: Capsule())
             }
+            .buttonStyle(ChunkyButtonStyle(
+                fill: Camp.later,
+                edge: Camp.laterEdge,
+                foreground: Camp.laterInk,
+                horizontalPadding: 16,
+                verticalPadding: 11
+            ))
         }
         .padding(.bottom, 12)
     }
 
+    /// Dusk at camp: everything reviewed. No score, no streak — just
+    /// what is marked and the way to act on it.
     private var finishedView: some View {
-        VStack(spacing: 16) {
-            Image(systemName: "checkmark.seal")
-                .font(.system(size: 52))
-                .foregroundStyle(.green)
-            Text("All sets reviewed")
-                .font(.title2.bold())
-            if !model.commitCandidates.isEmpty {
-                Text("\(model.commitCandidates.count.formatted()) photos are marked for deletion.")
-                    .foregroundStyle(.secondary)
-                Button("Review and delete") {
-                    showingCommit = true
+        ZStack(alignment: .bottom) {
+            DuskScene()
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .overlay(alignment: .topLeading) {
+                    GeometryReader { geometry in
+                        let scale = geometry.size.width / 390
+                        Raccoon(mood: .content, pose: .sitting)
+                            .frame(width: 118 * scale)
+                            .offset(x: 44 * scale, y: 332 * scale)
+                    }
                 }
-                .buttonStyle(.borderedProminent)
-            } else {
-                Text("Nothing is marked for deletion. Good work.")
-                    .foregroundStyle(.secondary)
+                .ignoresSafeArea()
+
+            VStack(spacing: 10) {
+                Text("All sets reviewed")
+                    .font(Camp.display(.largeTitle, weight: .semibold))
+                    .foregroundStyle(Camp.ink)
+                if !model.commitCandidates.isEmpty {
+                    Text("^[\(model.commitCandidates.count) photo](inflect: true) marked for deletion.")
+                        .foregroundStyle(Camp.muted)
+                    Button {
+                        showingCommit = true
+                    } label: {
+                        Label("Review and delete", systemImage: "trash.fill")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(ChunkyButtonStyle(
+                        fill: Camp.toss,
+                        edge: Camp.tossEdge,
+                        cornerRadius: 22,
+                        font: Camp.display(.title3, weight: .semibold),
+                        verticalPadding: 16
+                    ))
+                    .padding(.top, 12)
+                } else {
+                    Text("Nothing is marked for deletion. Good work.")
+                        .foregroundStyle(Camp.muted)
+                }
             }
+            .multilineTextAlignment(.center)
+            .padding(.horizontal, 22)
+            .padding(.top, 28)
+            .padding(.bottom, 24)
+            .frame(maxWidth: .infinity)
+            .background(
+                UnevenRoundedRectangle(topLeadingRadius: 32, topTrailingRadius: 32, style: .continuous)
+                    .fill(Camp.sheet)
+                    .ignoresSafeArea(edges: .bottom)
+            )
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // The scene is drawn to width; below it, the camp ground
+        // continues rather than the deck's meadow.
+        .background(Color(hex: 0x6E8B4E).ignoresSafeArea())
     }
 
     // MARK: - Gestures

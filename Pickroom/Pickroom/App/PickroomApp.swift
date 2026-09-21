@@ -16,6 +16,11 @@ struct PickroomApp: App {
         WindowGroup {
             RootView()
                 .environment(model)
+                // The campground palette is drawn for daylight; a dusk
+                // variant is future work, so pin light for now.
+                .preferredColorScheme(.light)
+                .fontDesign(.rounded)
+                .tint(Camp.keep)
         }
     }
 }

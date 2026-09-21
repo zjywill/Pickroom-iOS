@@ -25,6 +25,7 @@ struct CommitSheet: View {
                     reviewContent
                 }
             }
+            .background(Camp.sheet)
             .navigationTitle("Commit")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -42,14 +43,14 @@ struct CommitSheet: View {
 
     private var emptyState: some View {
         VStack(spacing: 12) {
-            Image(systemName: "checkmark.circle")
-                .font(.system(size: 44))
-                .foregroundStyle(.green)
+            Raccoon(mood: .content)
+                .frame(width: 96)
             Text("Nothing is marked for deletion")
-                .font(.headline)
+                .font(Camp.display(.title3, weight: .semibold))
+                .foregroundStyle(Camp.ink)
             Text("Swipe left on a card to discard its clearly-bad frames, then come back here.")
                 .font(.subheadline)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Camp.muted)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal)
         }
@@ -61,51 +62,69 @@ struct CommitSheet: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     // Wording that matches what will actually happen.
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text(
-                            CommitComposer.headline(
-                                count: model.commitCandidates.count,
-                                situation: model.diagnosis
+                    HStack(alignment: .top, spacing: 14) {
+                        IconBadge(systemImage: "trash.fill", fill: Camp.stone, size: 52)
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text(
+                                CommitComposer.headline(
+                                    count: model.commitCandidates.count,
+                                    situation: model.diagnosis
+                                )
                             )
-                        )
-                        .font(.title3.bold())
-                        Text(CommitComposer.supportingLine())
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                        if model.diagnosis == .iCloudFullCopies {
-                            Text("Tip: turning on Optimise iPhone Storage in Settings can free space without deleting anything — check that your iCloud plan has room first.")
-                                .font(.caption)
-                                .foregroundStyle(.tertiary)
+                            .font(Camp.display(.title2, weight: .semibold))
+                            .foregroundStyle(Camp.ink)
+                            Text(CommitComposer.supportingLine())
+                                .font(.subheadline)
+                                .foregroundStyle(Camp.muted)
                         }
-                    }
-                    .padding()
-                    .background(.red.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
-
-                    Text("Touch and hold a photo to keep it instead.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-
-                    if let error = model.lastCommitError {
-                        Label(error, systemImage: "exclamationmark.triangle")
-                            .font(.subheadline)
-                            .foregroundStyle(.red)
                     }
 
                     rejectGrid
+
+                    Text("Touch and hold a photo to keep it instead.")
+                        .font(.footnote.weight(.bold))
+                        .foregroundStyle(Camp.muted)
+                        .frame(maxWidth: .infinity)
+
+                    if let error = model.lastCommitError {
+                        notice(error, systemImage: "exclamationmark.triangle.fill", fill: Color(hex: 0xF9D9CF), badge: Camp.toss, ink: Camp.tossEdge)
+                    }
+
+                    if model.diagnosis == .iCloudFullCopies {
+                        notice(
+                            "Tip: turning on Optimise iPhone Storage in Settings can free space without deleting anything — check that your iCloud plan has room first.",
+                            systemImage: "sparkles",
+                            fill: Color(hex: 0xE1EDCF),
+                            badge: Camp.keep,
+                            ink: Color(hex: 0x2F4A28)
+                        )
+                    }
                 }
-                .padding()
+                .padding(20)
             }
 
             commitBar
         }
     }
 
+    private func notice(_ text: String, systemImage: String, fill: Color, badge: Color, ink: Color) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            IconBadge(systemImage: systemImage, fill: badge, size: 32)
+            Text(text)
+                .font(.subheadline)
+                .foregroundStyle(ink)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(fill))
+    }
+
     /// The full set as a grid — evidence, before anything leaves the
     /// library.
     private var rejectGrid: some View {
         LazyVGrid(
-            columns: [GridItem(.adaptive(minimum: 76), spacing: 6)],
-            spacing: 6
+            columns: [GridItem(.adaptive(minimum: 76), spacing: 10)],
+            spacing: 12
         ) {
             ForEach(model.commitCandidates, id: \.self) { key in
                 RejectThumb(assetKey: key)
@@ -130,22 +149,29 @@ struct CommitSheet: View {
                     ProgressView()
                         .tint(.white)
                 } else {
-                    Text(
+                    Label(
                         CommitComposer.headline(
                             count: model.commitCandidates.count,
                             situation: model.diagnosis
-                        )
+                        ),
+                        systemImage: "trash.fill"
                     )
                 }
             }
             .frame(maxWidth: .infinity)
-            .padding(.vertical, 8)
         }
-        .buttonStyle(.borderedProminent)
-        .tint(.red)
+        .buttonStyle(ChunkyButtonStyle(
+            fill: Camp.toss,
+            edge: Camp.tossEdge,
+            cornerRadius: 22,
+            font: Camp.display(.headline, weight: .semibold),
+            verticalPadding: 16
+        ))
         .disabled(isCommitting)
-        .padding()
-        .background(.bar)
+        .padding(.horizontal, 20)
+        .padding(.top, 12)
+        .padding(.bottom, 8)
+        .background(Camp.sheet)
     }
 
     private func commit() {
@@ -177,11 +203,16 @@ private struct RejectThumb: View {
                     .resizable()
                     .scaledToFill()
             } else {
-                Rectangle().fill(.quaternary)
+                Rectangle().fill(Camp.sand)
             }
         }
         .frame(width: 76, height: 76)
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Camp.panelEdge)
+                .offset(y: 3)
+        )
         .task(id: assetKey) {
             let identifier = String(assetKey.dropFirst("photos:".count))
             image = await model.imageProvider.thumbnail(for: identifier)
