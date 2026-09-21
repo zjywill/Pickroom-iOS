@@ -232,3 +232,78 @@ struct CampProgressBar: View {
         .accessibilityValue("\(Int(value * 100)) percent")
     }
 }
+
+/// The ✕ / ✓ disc on a thumbnail: red for marked, green for keeper.
+struct DecisionMark: View {
+    enum Kind { case marked, keeper, flagged }
+    let kind: Kind
+    var size: CGFloat = 22
+
+    var body: some View {
+        Group {
+            switch kind {
+            case .marked:
+                disc(Image(systemName: "xmark"), fill: Camp.toss)
+            case .keeper:
+                disc(Image(systemName: "checkmark"), fill: Camp.keep)
+            case .flagged:
+                // The app's own "clearly bad" flag: an outline, so it
+                // never reads as a decision the user made.
+                Circle()
+                    .strokeBorder(Camp.toss, lineWidth: 2.5)
+                    .background(Circle().fill(Camp.cream))
+                    .frame(width: size, height: size)
+            }
+        }
+        .accessibilityHidden(true)
+    }
+
+    private func disc(_ image: Image, fill: Color) -> some View {
+        image
+            .font(.system(size: size * 0.5, weight: .black))
+            .foregroundStyle(.white)
+            .frame(width: size, height: size)
+            .background(Circle().fill(fill))
+            .overlay(Circle().strokeBorder(Camp.cream, lineWidth: 2))
+    }
+}
+
+/// Pill-shaped segmented control in the camp palette.
+struct CampSegmented<Value: Hashable & Identifiable>: View {
+    let options: [Value]
+    @Binding var selection: Value
+    let title: (Value) -> String
+
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(options) { option in
+                let selected = option == selection
+                Button {
+                    withAnimation(.snappy(duration: 0.2)) { selection = option }
+                } label: {
+                    Text(title(option))
+                        .font(Camp.display(.subheadline, weight: .semibold))
+                        .foregroundStyle(selected ? .white : Camp.muted)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                        .background {
+                            if selected {
+                                Capsule()
+                                    .fill(Camp.wood)
+                                    .shadow(color: Camp.woodEdge, radius: 0, x: 0, y: 3)
+                            }
+                        }
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(selected ? .isSelected : [])
+            }
+        }
+        .padding(5)
+        .background(
+            Capsule()
+                .fill(Camp.cream)
+                .shadow(color: Camp.panelEdge, radius: 0, x: 0, y: 4)
+        )
+    }
+}

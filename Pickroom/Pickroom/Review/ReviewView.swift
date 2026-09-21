@@ -22,14 +22,10 @@ struct ReviewView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Picker("Filter", selection: $filter) {
-                ForEach(Filter.allCases) { filter in
-                    Text(filter.rawValue).tag(filter)
-                }
-            }
-            .pickerStyle(.segmented)
-            .padding(.horizontal)
-            .padding(.vertical, 8)
+            CampSegmented(options: Filter.allCases, selection: $filter, title: \.rawValue)
+                .padding(.horizontal)
+                .padding(.top, 4)
+                .padding(.bottom, 12)
 
             switch filter {
             case .sets: setsList
@@ -38,6 +34,7 @@ struct ReviewView: View {
             case .video: videoList
             }
         }
+        .background(Camp.paper)
         .navigationTitle("Review")
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
@@ -64,39 +61,32 @@ struct ReviewView: View {
                     NavigationLink {
                         GroupDetailView(group: group)
                     } label: {
-                        HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(group.headline)
-                                    .font(.subheadline)
-                                Text(group.kind.title)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            if !group.flaggedKeys.isEmpty {
-                                Text("\(group.flaggedKeys.count)")
-                                    .font(.subheadline.monospacedDigit())
-                                    .foregroundStyle(.red)
-                            }
-                            if group.state != .pending {
-                                Image(systemName: group.state == .dismissed ? "eye.slash" : "checkmark")
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
+                        SetRow(group: group)
                     }
+                    .listRowBackground(
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .fill(Camp.cream)
+                            .padding(.vertical, 1)
+                    )
+                    .listRowSeparator(.hidden)
                     .swipeActions {
                         if group.state == .pending {
                             Button("Ignore") {
                                 Task { await model.dismissGroup(id: group.id) }
                             }
-                            .tint(.gray)
+                            .tint(Camp.stone)
                         }
                     }
                 }
             } header: {
                 Text("Cheapest decision first")
+                    .font(Camp.display(.subheadline, weight: .semibold))
+                    .foregroundStyle(Camp.muted)
+                    .textCase(nil)
             }
         }
+        .listRowSpacing(10)
+        .scrollContentBackground(.hidden)
     }
 
     // MARK: - Picks
@@ -144,7 +134,8 @@ struct ReviewView: View {
                 let videos = model.records.filter(\.isContainedVideo)
                 if videos.isEmpty {
                     Text("No videos.")
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Camp.muted)
+                        .listRowBackground(Camp.cream)
                 }
                 ForEach(videos) { record in
                     HStack {
@@ -154,30 +145,77 @@ struct ReviewView: View {
                             "Photos",
                             destination: URL(string: "photos-redirect://")!
                         )
-                        .font(.caption)
+                        .font(.caption.weight(.heavy))
                     }
+                    .listRowBackground(Camp.cream)
                 }
             } header: {
                 Text("Video")
+                    .font(Camp.display(.subheadline, weight: .semibold))
+                    .foregroundStyle(Camp.muted)
+                    .textCase(nil)
             } footer: {
                 Text("A poster frame tells you almost nothing about a video, so Pickroom never judges one. Screen recordings are the exception — they live with expired screenshots.")
+                    .foregroundStyle(Camp.muted)
             }
         }
+        .scrollContentBackground(.hidden)
     }
 
     private func emptyText(_ text: String) -> some View {
-        Text(text)
-            .foregroundStyle(.secondary)
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 40)
-            .padding(.horizontal)
+        VStack(spacing: 14) {
+            Raccoon(mood: .content)
+                .frame(width: 84)
+            Text(text)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(Camp.muted)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 40)
+        .padding(.horizontal)
     }
 
     private func footnote(_ text: String) -> some View {
         Text(text)
             .font(.footnote)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(Camp.muted)
             .padding()
+    }
+}
+
+/// One set in the list: its kind as a ribbon, the headline, the
+/// flagged count, and whether it's been dealt with.
+private struct SetRow: View {
+    let group: PhotoGroup
+
+    var body: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 6) {
+                CampTag(text: group.kind.title)
+                    .scaleEffect(0.85, anchor: .leading)
+                Text(group.headline)
+                    .font(.subheadline.weight(.bold))
+                    .foregroundStyle(Camp.ink)
+            }
+            Spacer(minLength: 0)
+            if !group.flaggedKeys.isEmpty {
+                Text("\(group.flaggedKeys.count)")
+                    .font(Camp.display(.subheadline, weight: .bold))
+                    .foregroundStyle(.white)
+                    .monospacedDigit()
+                    .padding(.horizontal, 9)
+                    .frame(minWidth: 28, minHeight: 28)
+                    .background(Capsule().fill(Camp.toss))
+                    .accessibilityLabel("\(group.flaggedKeys.count) flagged")
+            }
+            if group.state != .pending {
+                Image(systemName: group.state == .dismissed ? "eye.slash" : "checkmark")
+                    .font(.subheadline.weight(.heavy))
+                    .foregroundStyle(group.state == .dismissed ? Camp.stone : Camp.keep)
+            }
+        }
+        .padding(.vertical, 4)
     }
 }
 
@@ -192,8 +230,8 @@ private struct PhotoGrid: View {
 
     var body: some View {
         LazyVGrid(
-            columns: [GridItem(.adaptive(minimum: 96), spacing: 6)],
-            spacing: 6
+            columns: [GridItem(.adaptive(minimum: 96), spacing: 10)],
+            spacing: 12
         ) {
             ForEach(keys, id: \.self) { key in
                 let cell = GridThumb(
@@ -234,11 +272,20 @@ private struct GridThumb: View {
                         .resizable()
                         .scaledToFill()
                 } else {
-                    Rectangle().fill(.quaternary)
+                    Rectangle().fill(Camp.sand)
                 }
             }
-            .clipShape(RoundedRectangle(cornerRadius: 8))
-            .overlay(alignment: .bottomTrailing) { badge }
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(ringColor, lineWidth: 3)
+            )
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(Camp.panelEdge)
+                    .offset(y: 3)
+            )
+            .overlay(alignment: .bottomTrailing) { badge.padding(5) }
             .task(id: assetKey) {
                 let identifier = String(assetKey.dropFirst("photos:".count))
                 image = await model.imageProvider.thumbnail(for: identifier)
@@ -251,19 +298,21 @@ private struct GridThumb: View {
     private var badge: some View {
         switch decision {
         case .pick?:
-            Image(systemName: "checkmark.circle.fill")
-                .foregroundStyle(.white, .green)
-                .padding(4)
+            DecisionMark(kind: .keeper)
         case .reject?:
-            Image(systemName: "xmark.circle.fill")
-                .foregroundStyle(.white, .red)
-                .padding(4)
+            DecisionMark(kind: .marked)
         default:
             if isFlagged {
-                Image(systemName: "xmark.circle")
-                    .foregroundStyle(.red)
-                    .padding(4)
+                DecisionMark(kind: .flagged)
             }
+        }
+    }
+
+    private var ringColor: Color {
+        switch decision {
+        case .pick?: Camp.keep
+        case .reject?: Camp.toss
+        default: .clear
         }
     }
 
@@ -291,20 +340,21 @@ private struct AssetRow: View {
                         .resizable()
                         .scaledToFill()
                 } else {
-                    Rectangle().fill(.quaternary)
+                    Rectangle().fill(Camp.sand)
                 }
             }
             .frame(width: 44, height: 44)
-            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(record.fileName ?? record.key)
-                    .font(.subheadline)
+                    .font(.subheadline.weight(.bold))
+                    .foregroundStyle(Camp.ink)
                     .lineLimit(1)
                 if let date = record.capturedAt {
                     Text(date.formatted(date: .abbreviated, time: .omitted))
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Camp.muted)
                 }
             }
         }
@@ -324,12 +374,14 @@ private struct GroupDetailView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
+                CampTag(text: group.kind.title)
                 Text(group.headline)
-                    .font(.headline)
+                    .font(Camp.display(.title2, weight: .semibold))
+                    .foregroundStyle(Camp.ink)
                 if let span = group.span {
                     Text(span.start.formatted(date: .abbreviated, time: .shortened))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .font(.footnote.weight(.bold))
+                        .foregroundStyle(Camp.muted)
                 }
                 PhotoGrid(
                     keys: group.memberKeys,
@@ -340,11 +392,14 @@ private struct GroupDetailView: View {
                 if !group.flaggedKeys.isEmpty {
                     Text("\(group.flaggedKeys.count) of \(group.memberKeys.count) are flagged as clearly bad (○). The default action removes exactly these; ✕ marks what you chose to delete.")
                         .font(.footnote)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Camp.muted)
+                        .campPanel(padding: 14)
+                        .padding(.top, 6)
                 }
             }
             .padding()
         }
+        .background(Camp.paper)
         .navigationTitle(group.kind.title)
         .navigationBarTitleDisplayMode(.inline)
     }

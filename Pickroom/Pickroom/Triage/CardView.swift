@@ -234,9 +234,9 @@ private struct MemberThumb: View {
         )
         .overlay(alignment: .bottomTrailing) {
             if isMarked {
-                markBadge("xmark", fill: Camp.toss)
+                DecisionMark(kind: .marked).offset(x: 5, y: 5)
             } else if isKeeper {
-                markBadge("checkmark", fill: Camp.keep)
+                DecisionMark(kind: .keeper).offset(x: 5, y: 5)
             }
         }
         .onTapGesture(perform: onTap)
@@ -245,15 +245,5 @@ private struct MemberThumb: View {
             image = await model.imageProvider.thumbnail(for: identifier)
         }
         .accessibilityLabel(isMarked ? "Marked for deletion" : "Keeping")
-    }
-
-    private func markBadge(_ systemImage: String, fill: Color) -> some View {
-        Image(systemName: systemImage)
-            .font(.system(size: 11, weight: .black))
-            .foregroundStyle(.white)
-            .frame(width: 22, height: 22)
-            .background(Circle().fill(fill))
-            .overlay(Circle().strokeBorder(Camp.cream, lineWidth: 2))
-            .offset(x: 5, y: 5)
     }
 }

@@ -29,12 +29,12 @@ struct GroupSheet: View {
 
                     if let suggestion = card.suggestion,
                        !suggestion.reasons.isEmpty {
-                        Label(
-                            "Suggested keeper: \(suggestion.reasons.joined(separator: " · "))",
-                            systemImage: "sparkles"
-                        )
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
+                        HStack(spacing: 10) {
+                            IconBadge(systemImage: "sparkles", fill: Camp.keep, size: 30)
+                            Text("Suggested keeper: \(suggestion.reasons.joined(separator: " · "))")
+                                .font(.subheadline.weight(.bold))
+                                .foregroundStyle(Camp.mossInk)
+                        }
                     }
 
                     memberGrid(card)
@@ -43,7 +43,10 @@ struct GroupSheet: View {
                         // Secondary, deliberate: picking the single
                         // keeper out of several good frames is the
                         // user's judgement, not the app's.
-                        Section {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Secondary action")
+                                .font(Camp.display(.footnote, weight: .bold))
+                                .foregroundStyle(Camp.muted)
                             Button {
                                 deck.reduceToOne()
                                 dismiss()
@@ -52,27 +55,26 @@ struct GroupSheet: View {
                                     "Reduce to one — discard the rest",
                                     systemImage: "square.stack.3d.up.slash"
                                 )
+                                .frame(maxWidth: .infinity)
                             }
-                            .buttonStyle(.bordered)
-                            .tint(.orange)
-                        } header: {
-                            Text("Secondary action")
-                                .font(.footnote.bold())
-                                .foregroundStyle(.secondary)
+                            .buttonStyle(.later)
                         }
+                        .padding(.top, 8)
 
                         // Permanently ignore this group.
-                        Button(role: .destructive) {
+                        Button {
                             deck.dismissCurrentCard()
                             dismiss()
                         } label: {
                             Label("Ignore this set permanently", systemImage: "eye.slash")
+                                .frame(maxWidth: .infinity)
                         }
-                        .font(.footnote)
+                        .buttonStyle(.campPlain)
                     }
                 }
-                .padding()
+                .padding(20)
             }
+            .background(Camp.sheet)
             .navigationTitle(card.group.kind.title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -86,21 +88,21 @@ struct GroupSheet: View {
     private func header(_ card: CardModel) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(card.group.headline)
-                .font(.title3.bold())
+                .font(Camp.display(.title2, weight: .semibold))
+                .foregroundStyle(Camp.ink)
             if let span = card.group.span {
                 Text(span.start.formatted(date: .abbreviated, time: .shortened))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .font(.footnote.weight(.bold))
+                    .foregroundStyle(Camp.muted)
             }
         }
     }
 
     private func memberGrid(_ card: CardModel) -> some View {
         let keeperKey = deck.keeperKey(for: card)
-        return 
-LazyVGrid(
-            columns: [GridItem(.adaptive(minimum: 90), spacing: 8)],
-            spacing: 8
+        return LazyVGrid(
+            columns: [GridItem(.adaptive(minimum: 90), spacing: 10)],
+            spacing: 14
         ) {
             ForEach(card.group.memberKeys, id: \.self) { key in
                 GroupMemberCell(
@@ -140,40 +142,37 @@ private struct GroupMemberCell: View {
                         .resizable()
                         .scaledToFill()
                 } else {
-                    Rectangle().fill(.quaternary)
+                    Rectangle().fill(Camp.sand)
                 }
             }
             .frame(width: 90, height: 90)
-            .clipShape(RoundedRectangle(cornerRadius: 10))
-            .overlay(alignment: .topLeading) {
-                if isMarked {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.white, .red)
-                        .padding(4)
-                }
-            }
-            .overlay(alignment: .topTrailing) {
-                if isKeeper {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(.white, .green)
-                        .padding(4)
-                }
-            }
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: 10)
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
                     .strokeBorder(
-                        isMarked ? Color.red : (isKeeper ? Color.green : .clear),
-                        lineWidth: 2
+                        isMarked ? Camp.toss : (isKeeper ? Camp.keep : .clear),
+                        lineWidth: 3
                     )
             )
+            .overlay(alignment: .bottomTrailing) {
+                if isMarked {
+                    DecisionMark(kind: .marked).offset(x: 5, y: 5)
+                } else if isKeeper {
+                    DecisionMark(kind: .keeper).offset(x: 5, y: 5)
+                }
+            }
             .onTapGesture(perform: onTap)
 
             Menu {
                 Button("Make this the keeper", action: onMakeKeeper)
             } label: {
                 Text(decisionLabel)
-                    .font(.caption2)
+                    .font(.caption.weight(.heavy))
+                    .foregroundStyle(isMarked ? Camp.toss : (isKeeper ? Camp.keep : Camp.muted))
                     .lineLimit(1)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(Capsule().fill(Camp.cream))
             }
         }
         .task(id: assetKey) {

@@ -229,51 +229,63 @@ struct ReportView: View {
 
     var body: some View {
         NavigationStack {
-            List {
-                if let report = model.lastCommitReport {
-                    Section {
-                        Label(
-                            "\(report.deletedCount.formatted()) photos deleted",
-                            systemImage: "checkmark.circle.fill"
-                        )
-                        .font(.title3.bold())
-                        .foregroundStyle(.green)
-
-                        Label(
-                            "Moved to Recently Deleted — erased after 30 days",
-                            systemImage: "clock.badge.checkmark"
-                        )
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                    }
-
-                    Section("Space") {
-                        storageRow(report)
-                        if report.storageBefore.totalCapacity > 0 {
-                            // The device storage bar the user already
-                            // has an intuition for.
-                            StorageBar(
-                                available: report.storageBefore.availableCapacity,
-                                total: report.storageBefore.totalCapacity
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    if let report = model.lastCommitReport {
+                        VStack(spacing: 10) {
+                            Raccoon(mood: .content)
+                                .frame(width: 96)
+                            Text("\(report.deletedCount.formatted()) photos deleted")
+                                .font(Camp.display(.title, weight: .semibold))
+                                .foregroundStyle(Camp.ink)
+                            Label(
+                                "Moved to Recently Deleted — erased after 30 days",
+                                systemImage: "clock.badge.checkmark"
                             )
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(Camp.muted)
                         }
-                    }
-                }
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
 
-                Section("Recently Deleted") {
-                    Label(
-                        "\(model.recentlyDeletedPending.formatted()) photos pending",
-                        systemImage: "trash"
-                    )
-                    Text("Space is not freed until Recently Deleted is emptied. Pickroom will never empty it for you — that step is yours, in the Photos app.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Link(
-                        "Open Photos",
-                        destination: URL(string: "photos-redirect://")!
-                    )
+                        VStack(alignment: .leading, spacing: 12) {
+                            CampTag(text: "Space")
+                            storageRow(report)
+                            if report.storageBefore.totalCapacity > 0 {
+                                // The device storage bar the user already
+                                // has an intuition for.
+                                StorageBar(
+                                    available: report.storageBefore.availableCapacity,
+                                    total: report.storageBefore.totalCapacity
+                                )
+                            }
+                        }
+                        .campPanel(padding: 18)
+                    }
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack(spacing: 12) {
+                            IconBadge(systemImage: "trash.fill", fill: Camp.wood, size: 36)
+                            Text("\(model.recentlyDeletedPending.formatted()) photos pending in Recently Deleted")
+                                .font(.subheadline.weight(.heavy))
+                                .foregroundStyle(Camp.ink)
+                        }
+                        Text("Space is not freed until Recently Deleted is emptied. Pickroom will never empty it for you — that step is yours, in the Photos app.")
+                            .font(.footnote)
+                            .foregroundStyle(Camp.muted)
+                        Link(destination: URL(string: "photos-redirect://")!) {
+                            Label("Open Photos", systemImage: "arrow.up.right")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.wood)
+                        .padding(.top, 4)
+                    }
+                    .campPanel(padding: 18)
                 }
+                .padding(20)
             }
+            .background(Camp.sheet)
             .navigationTitle("Session report")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -290,11 +302,12 @@ struct ReportView: View {
         let freed = after.availableCapacity - report.storageBefore.availableCapacity
         if freed > 0 {
             Text("About \(ByteCountFormatter.string(fromByteCount: freed, countStyle: .file)) freed on this device")
-                .font(.subheadline)
+                .font(.subheadline.weight(.bold))
+                .foregroundStyle(Camp.ink)
         } else {
             Text("Storage updates may lag a moment while iOS reconciles")
                 .font(.subheadline)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Camp.muted)
         }
     }
 }
@@ -308,13 +321,13 @@ struct StorageBar: View {
         GeometryReader { geometry in
             let used = max(0, min(1, 1 - Double(available) / Double(max(total, 1))))
             ZStack(alignment: .leading) {
-                Capsule().fill(.quaternary)
+                Capsule().fill(Camp.sand)
                 Capsule()
-                    .fill(.orange.gradient)
+                    .fill(Camp.later)
                     .frame(width: geometry.size.width * used)
             }
         }
-        .frame(height: 10)
+        .frame(height: 12)
         .accessibilityLabel("Storage \(Int((1 - Double(available) / Double(max(total, 1))) * 100)) percent used")
     }
 }
