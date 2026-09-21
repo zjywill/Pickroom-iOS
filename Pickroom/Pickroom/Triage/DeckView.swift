@@ -141,7 +141,6 @@ struct DeckView: View {
                 showingCommit = true
             } label: {
                 Image(systemName: "trash.fill")
-                    .foregroundStyle(.white)
             }
             .buttonStyle(RoundChunkyButtonStyle(fill: Camp.toss, edge: Camp.tossEdge))
             .overlay(alignment: .topTrailing) {

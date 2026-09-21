@@ -46,6 +46,10 @@ enum Camp {
     static let recording = Color(hex: 0xD96E9A)
     static let stone = Color(hex: 0x8C8790)
 
+    // Disabled controls: flat, faint, muted
+    static let disabledFill = Color(hex: 0xFFFBF2).opacity(0.45)
+    static let disabledInk = Color(hex: 0x3A2E26).opacity(0.3)
+
     /// Rounded display type, following Dynamic Type.
     static func display(_ style: Font.TextStyle, weight: Font.Weight = .bold) -> Font {
         .system(style, design: .rounded, weight: weight)
@@ -80,25 +84,30 @@ struct ChunkyButtonStyle: ButtonStyle {
     private let depth: CGFloat = 5
 
     func makeBody(configuration: Configuration) -> some View {
-        let pressed = configuration.isPressed
+        // Disabled buttons lie flat: no edge, a faint cream fill, muted
+        // ink. Fading the coloured button instead muddies it into the
+        // background and reads as a stain, not as "not yet".
+        let pressed = configuration.isPressed && isEnabled
+        let lift: CGFloat = isEnabled ? (pressed ? 1 : depth) : 0
         configuration.label
             .font(font)
-            .foregroundStyle(foreground)
+            .foregroundStyle(isEnabled ? foreground : Camp.disabledInk)
             .padding(.horizontal, horizontalPadding)
             .padding(.vertical, verticalPadding)
             .background {
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .fill(fill)
+                    .fill(isEnabled ? fill : Camp.disabledFill)
             }
             .background {
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                     .fill(edge)
-                    .offset(y: pressed ? 1 : depth)
+                    .offset(y: lift)
+                    .opacity(isEnabled ? 1 : 0)
             }
-            .offset(y: pressed ? depth - 1 : 0)
+            .offset(y: depth - lift)
             .padding(.bottom, depth)
-            .opacity(isEnabled ? 1 : 0.45)
             .animation(.spring(duration: 0.12), value: pressed)
+            .animation(.easeOut(duration: 0.2), value: isEnabled)
     }
 }
 
@@ -114,25 +123,36 @@ extension ButtonStyle where Self == ChunkyButtonStyle {
     }
 }
 
-/// A round icon button with the same pressed-onto-edge behaviour.
+/// A round icon button with the same pressed-onto-edge behaviour, and
+/// the same flat look when disabled.
 struct RoundChunkyButtonStyle: ButtonStyle {
     var fill: Color
     var edge: Color
+    var foreground: Color = .white
     var size: CGFloat = 46
 
     @Environment(\.isEnabled) private var isEnabled
 
+    private let depth: CGFloat = 4
+
     func makeBody(configuration: Configuration) -> some View {
-        let pressed = configuration.isPressed
+        let pressed = configuration.isPressed && isEnabled
+        let lift: CGFloat = isEnabled ? (pressed ? 1 : depth) : 0
         configuration.label
             .font(.system(size: size * 0.42, weight: .bold, design: .rounded))
+            .foregroundStyle(isEnabled ? foreground : Camp.disabledInk)
             .frame(width: size, height: size)
-            .background(Circle().fill(fill))
-            .background(Circle().fill(edge).offset(y: pressed ? 1 : 4))
-            .offset(y: pressed ? 3 : 0)
-            .padding(.bottom, 4)
-            .opacity(isEnabled ? 1 : 0.45)
+            .background(Circle().fill(isEnabled ? fill : Camp.disabledFill))
+            .background(
+                Circle()
+                    .fill(edge)
+                    .offset(y: lift)
+                    .opacity(isEnabled ? 1 : 0)
+            )
+            .offset(y: depth - lift)
+            .padding(.bottom, depth)
             .animation(.spring(duration: 0.12), value: pressed)
+            .animation(.easeOut(duration: 0.2), value: isEnabled)
     }
 }
 
