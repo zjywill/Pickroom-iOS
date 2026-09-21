@@ -1,0 +1,394 @@
+import XCTest
+import Photos
+import PickroomCore
+@testable import Pickroom
+
+/// App-layer tests over the triage logic: gestures produce the
+/// expected decisions; undo restores a whole group in one step;
+/// decisions survive a simulated process kill; undeletable assets never
+/// enter the candidate set; the commit count matches the pending
+/// rejects.
+@MainActor
+final class DeckModelTests: XCTestCase {
+    private var persistence: PersistenceStore!
+    private var temporaryDirectory: URL!
+
+    override func setUp() async throws {
+        temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("deck-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+        persistence = PersistenceStore(directory: temporaryDirectory)
+    }
+
+    override func tearDown() async throws {
+        try? FileManager.default.removeItem(at: temporaryDirectory)
+    }
+
+    private func makeRecords() -> [AssetRecord] {
+        [
+            AssetRecord(key: "photos:a", capturedAt: Date(timeIntervalSince1970: 1_700_000_000)),
+            AssetRecord(key: "photos:b", capturedAt: Date(timeIntervalSince1970: 1_700_000_000).addingTimeInterval(0.5)),
+            AssetRecord(key: "photos:c", capturedAt: Date(timeIntervalSince1970: 1_700_000_000).addingTimeInterval(1.0)),
+        ]
+    }
+
+    private func burstGroup(flagged: [String]) -> PhotoGroup {
+        PhotoGroup(
+            id: PhotoGroup.makeID(kind: .burst, memberKeys: ["photos:a", "photos:b", "photos:c"]),
+            kind: .burst,
+            memberKeys: ["photos:a", "photos:b", "photos:c"],
+            representativeKey: "photos:a",
+            certainty: 0.8,
+            flaggedKeys: flagged,
+            suggestedKeeperKey: "photos:a",
+            headline: "3 shots"
+        )
+    }
+
+    func testDiscardAppliesExactlyTheMarkedMembers() async throws {
+        let deck = DeckModel(
+            groups: [burstGroup(flagged: ["photos:b", "photos:c"])],
+            records: makeRecords(),
+            persistence: persistence
+        )
+        XCTAssertEqual(deck.currentCard?.markedKeys, ["photos:b", "photos:c"],
+                       "the card pre-marks the app's confident-bad frames")
+
+        deck.discard()
+        await deck.settleWrites()
+
+        let decisions = await persistence.loadDecisions()
+        XCTAssertEqual(decisions["photos:b"], .reject)
+        XCTAssertEqual(decisions["photos:c"], .reject)
+        XCTAssertNil(decisions["photos:a"], "the keeper is untouched")
+    }
+
+    func testKeepResolvesWithoutRejecting() async throws {
+        let deck = DeckModel(
+            groups: [burstGroup(flagged: ["photos:b"])],
+            records: makeRecords(),
+            persistence: persistence
+        )
+        deck.keep()
+        await deck.settleWrites()
+        let decisions = await persistence.loadDecisions()
+        XCTAssertTrue(decisions.values.allSatisfy { $0 != .reject })
+        let states = await persistence.loadGroupStates()
+        XCTAssertEqual(states.values.first, .resolved)
+    }
+
+    func testUndoRestoresWholeGroupInOneStep() async throws {
+        let deck = DeckModel(
+            groups: [burstGroup(flagged: ["photos:b", "photos:c"])],
+            records: makeRecords(),
+            persistence: persistence
+        )
+        deck.discard()
+        await deck.settleWrites()
+        XCTAssertTrue(deck.canUndo)
+
+        deck.undo()
+        await deck.settleWrites()
+
+        let decisions = deck.decisions
+        XCTAssertTrue(decisions.values.allSatisfy { $0 != .reject },
+                      "undoing a group restores all of its members at once")
+        // The card is back in front, with its marks.
+        XCTAssertEqual(deck.currentCard?.markedKeys, ["photos:b", "photos:c"])
+    }
+
+    func testToggleMarkChangesWhatDiscardRemoves() async throws {
+        let deck = DeckModel(
+            groups: [burstGroup(flagged: ["photos:b", "photos:c"])],
+            records: makeRecords(),
+            persistence: persistence
+        )
+        // The user vetoes the app's confidence on one frame.
+        deck.toggleMark(memberKey: "photos:c")
+        deck.discard()
+        await deck.settleWrites()
+
+        let decisions = await persistence.loadDecisions()
+        XCTAssertEqual(decisions["photos:b"], .reject)
+        XCTAssertNil(decisions["photos:c"])
+    }
+
+    func testReduceToOneMarksEverythingExceptTheKeeper() async throws {
+        let deck = DeckModel(
+            groups: [burstGroup(flagged: [])],
+            records: makeRecords(),
+            persistence: persistence
+        )
+        deck.reduceToOne(keeperKey: "photos:a")
+        XCTAssertEqual(deck.currentCard?.markedKeys, ["photos:b", "photos:c"])
+
+        deck.discard()
+        await deck.settleWrites()
+        let decisions = await persistence.loadDecisions()
+        XCTAssertEqual(decisions["photos:b"], .reject)
+        XCTAssertEqual(decisions["photos:c"], .reject)
+        XCTAssertNil(decisions["photos:a"])
+    }
+
+    func testKeepAllKindNeverDiscards() async throws {
+        let bracket = PhotoGroup(
+            id: PhotoGroup.makeID(kind: .bracket, memberKeys: ["photos:a", "photos:b"]),
+            kind: .bracket,
+            memberKeys: ["photos:a", "photos:b"],
+            representativeKey: "photos:a",
+            certainty: 0.1,
+            flaggedKeys: [],
+            headline: "Exposure bracket"
+        )
+        let deck = DeckModel(
+            groups: [bracket],
+            records: makeRecords(),
+            persistence: persistence
+        )
+        // Even with marks forced on, a bracket resolves as keep.
+        deck.reduceToOne(keeperKey: "photos:a")
+        deck.discard()
+        await deck.settleWrites()
+
+        let decisions = await persistence.loadDecisions()
+        XCTAssertTrue(decisions.values.allSatisfy { $0 != .reject },
+                      "keep-all kinds never receive a deletion prompt")
+    }
+
+    func testProbablyBadCardDiscardsNothingByDefault() async throws {
+        let card = PhotoGroup(
+            id: PhotoGroup.makeID(kind: .failedFrame, memberKeys: ["photos:b"]),
+            kind: .failedFrame,
+            memberKeys: ["photos:b"],
+            representativeKey: "photos:b",
+            certainty: 0.97,
+            flaggedKeys: [], // probablyBad: no proposal
+            headline: "Probably out of focus"
+        )
+        let deck = DeckModel(
+            groups: [card],
+            records: makeRecords(),
+            persistence: persistence
+        )
+        // The single-member swipe left is the user's own call.
+        deck.discard()
+        await deck.settleWrites()
+        let decisions = await persistence.loadDecisions()
+        XCTAssertEqual(decisions["photos:b"], .reject,
+                       "one swipe left on a single probably-bad photo is the user's decision")
+    }
+
+    /// `.iTunesSynced` and `.cloudShared` assets never enter the
+    /// candidate set — the release gate.
+    func testUndeletableAssetsNeverEnterCandidateSet() async throws {
+        var records = makeRecords()
+        records[1].contentHash = nil
+        let synced = AssetRecord(
+            key: "photos:synced",
+            capturedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            sourceType: .iTunesSynced
+        )
+        let shared = AssetRecord(
+            key: "photos:shared",
+            capturedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            sourceType: .cloudShared
+        )
+
+        let flagged = PhotoGroup(
+            id: PhotoGroup.makeID(kind: .expiredUtility, memberKeys: ["photos:synced", "photos:shared", "photos:a"]),
+            kind: .expiredUtility,
+            memberKeys: ["photos:synced", "photos:shared", "photos:a"],
+            representativeKey: "photos:a",
+            certainty: 0.7,
+            flaggedKeys: ["photos:synced", "photos:shared", "photos:a"],
+            headline: "3 screenshots"
+        )
+
+        let deck = DeckModel(
+            groups: [flagged],
+            records: records + [synced, shared],
+            persistence: persistence
+        )
+        deck.discard()
+        await deck.settleWrites()
+
+        XCTAssertEqual(
+            deck.pendingRejects,
+            ["photos:a"],
+            "undeletable and shared assets never enter a delete batch"
+        )
+
+        // The candidate filter as a pure function, too.
+        let candidates = PhotoKitLibrary.deletionCandidates(
+            from: records + [synced, shared],
+            decisions: [
+                "photos:synced": .reject,
+                "photos:shared": .reject,
+                "photos:a": .reject,
+            ]
+        )
+        XCTAssertEqual(candidates, ["photos:a"])
+    }
+
+    /// The commit sheet's count matches the pending rejects.
+    func testCommitCountMatchesPendingRejects() async throws {
+        let deck = DeckModel(
+            groups: [burstGroup(flagged: ["photos:b", "photos:c"])],
+            records: makeRecords(),
+            persistence: persistence
+        )
+        deck.discard()
+        await deck.settleWrites()
+        XCTAssertEqual(deck.pendingRejects.count, 2)
+
+        // Nothing is deleted during triage: decisions only.
+        let decisions = await persistence.loadDecisions()
+        XCTAssertEqual(decisions.filter { $0.value == .reject }.count, 2)
+    }
+
+    /// The summary on return reports photos reviewed, in the plan's
+    /// wording.
+    func testSessionSummaryReportsPhotosReviewed() {
+        let stored = PersistenceStore.StoredSession(
+            currentGroupID: nil,
+            reviewedCount: 2,
+            reviewedPhotoCount: 412,
+            date: Date()
+        )
+        let summary = DeckModel.sessionSummary(for: stored)
+        XCTAssertNotNil(summary)
+        XCTAssertTrue(summary?.contains("412 photos reviewed") == true, summary ?? "")
+
+        // Old sessions without the photo count still decode.
+        let json = """
+        {"currentGroupID":null,"reviewedCount":2,"date":770000000.5}
+        """
+        let decoded = try! JSONDecoder().decode(
+            PersistenceStore.StoredSession.self,
+            from: Data(json.utf8)
+        )
+        XCTAssertEqual(decoded.reviewedPhotoCount, 0)
+
+        XCTAssertNil(DeckModel.sessionSummary(for: nil))
+    }
+
+    /// Killing the app loses nothing: decisions survive a fresh store
+    /// over the same directory (a simulated process kill and relaunch).
+    func testDecisionsSurviveProcessKillAndRelaunch() async throws {
+        let deck1 = DeckModel(
+            groups: [burstGroup(flagged: ["photos:b"])],
+            records: makeRecords(),
+            persistence: persistence
+        )
+        deck1.discard()
+        await deck1.settleWrites()
+
+        // Simulate the process dying and a relaunch with a fresh store.
+        let relaunchedStore = PersistenceStore(directory: temporaryDirectory)
+        let deck2 = DeckModel(
+            groups: [burstGroup(flagged: ["photos:b"])],
+            records: makeRecords(),
+            decisions: await relaunchedStore.loadDecisions(),
+            persistence: relaunchedStore
+        )
+        XCTAssertEqual(deck2.pendingRejects, ["photos:b"],
+                       "decisions survive the relaunch")
+
+        await deck2.restoreSession()
+        // The session position survived too — the exact card is gone
+        // (resolved), so the deck is finished with it.
+        XCTAssertNotEqual(deck2.currentCard?.id, deck1.currentCard?.id)
+    }
+
+    func testSessionResumeReturnsToTheExactCard() async throws {
+        let group1 = burstGroup(flagged: [])
+        var group2 = group1
+        group2 = PhotoGroup(
+            id: PhotoGroup.makeID(kind: .nearDuplicate, memberKeys: ["photos:a", "photos:b"]),
+            kind: .nearDuplicate,
+            memberKeys: ["photos:a", "photos:b"],
+            representativeKey: "photos:a",
+            certainty: 0.5,
+            headline: "2 near-identical shots"
+        )
+        let deck = DeckModel(
+            groups: [group1, group2],
+            records: makeRecords(),
+            persistence: persistence
+        )
+        // User reviewed the first card and stopped on the second.
+        deck.discard()
+        await deck.settleWrites()
+        XCTAssertEqual(deck.currentCard?.id, group2.id)
+
+        // Kill, relaunch, restore.
+        let relaunchedStore = PersistenceStore(directory: temporaryDirectory)
+        let relaunched = DeckModel(
+            groups: [group1, group2],
+            records: makeRecords(),
+            decisions: await relaunchedStore.loadDecisions(),
+            persistence: relaunchedStore
+        )
+        await relaunched.restoreSession()
+        XCTAssertEqual(relaunched.currentCard?.id, group2.id,
+                       "reopening returns to the exact card")
+    }
+
+    func testLaterMovesCardToBack() async throws {
+        let group1 = burstGroup(flagged: [])
+        let group2 = PhotoGroup(
+            id: PhotoGroup.makeID(kind: .nearDuplicate, memberKeys: ["photos:a", "photos:b"]),
+            kind: .nearDuplicate,
+            memberKeys: ["photos:a", "photos:b"],
+            representativeKey: "photos:a",
+            certainty: 0.5,
+            headline: "2 near-identical shots"
+        )
+        let deck = DeckModel(
+            groups: [group1, group2],
+            records: makeRecords(),
+            persistence: persistence
+        )
+        XCTAssertEqual(deck.currentCard?.id, group1.id)
+
+        deck.decideLater()
+        XCTAssertEqual(deck.currentCard?.id, group2.id, "the next card slid into place")
+        XCTAssertEqual(deck.totalCardCount, 2, "the later card still counts as work")
+
+        // Finishing the second card wraps around to the deferred one.
+        deck.discard()
+        await deck.settleWrites()
+        XCTAssertEqual(deck.currentCard?.id, group1.id)
+    }
+
+    func testUndoDepthCappedAtConfiguredLimit() async {
+        var groups: [PhotoGroup] = []
+        for index in 0..<(DeckModel.undoDepth + 10) {
+            groups.append(
+                PhotoGroup(
+                    id: "g\(index)",
+                    kind: .failedFrame,
+                    memberKeys: ["photos:a"],
+                    representativeKey: "photos:a",
+                    certainty: 1,
+                    flaggedKeys: ["photos:a"],
+                    headline: "Broken"
+                )
+            )
+        }
+        let deck = DeckModel(
+            groups: groups,
+            records: makeRecords(),
+            persistence: persistence
+        )
+        for _ in 0..<(DeckModel.undoDepth + 10) {
+            deck.discard()
+        await deck.settleWrites()
+            // Rebuild the deck so every card is reachable in tests.
+            if deck.currentCard == nil { break }
+        }
+        XCTAssertLessThanOrEqual(deck.undoStack.count, DeckModel.undoDepth)
+        XCTAssertGreaterThanOrEqual(deck.undoStack.count, DeckModel.undoDepth - 1,
+                                    "the plan requires a depth of at least 20")
+    }
+}

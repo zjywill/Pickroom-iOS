@@ -1,0 +1,456 @@
+import Foundation
+import Observation
+import BackgroundTasks
+import Photos
+import UIKit
+import PickroomCore
+
+/// Monitors thermals and Low Power Mode. Fingerprinting pauses at
+/// `thermalState >= .serious` and in Low Power Mode and resumes when
+/// they clear — a culling app that heats the phone gets deleted.
+@MainActor
+@Observable
+final class PowerGate {
+    private(set) var isThermallySerious = false
+    private(set) var isLowPowerMode = false
+
+    var isPaused: Bool { isThermallySerious || isLowPowerMode }
+
+    private var observers: [NSObjectProtocol] = []
+
+    init(processInfo: ProcessInfo = .processInfo) {
+        isThermallySerious = processInfo.thermalState == .serious
+            || processInfo.thermalState == .critical
+        isLowPowerMode = processInfo.isLowPowerModeEnabled
+
+        observers.append(NotificationCenter.default.addObserver(
+            forName: ProcessInfo.thermalStateDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            let info = ProcessInfo.processInfo
+            Task { @MainActor in
+                self?.isThermallySerious =
+                    info.thermalState == .serious || info.thermalState == .critical
+            }
+        })
+        observers.append(NotificationCenter.default.addObserver(
+            forName: NSNotification.Name.NSProcessInfoPowerStateDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            let info = ProcessInfo.processInfo
+            Task { @MainActor in
+                self?.isLowPowerMode = info.isLowPowerModeEnabled
+            }
+        })
+    }
+
+    // PowerGate lives for the app's lifetime; observers use [weak self]
+    // and are never removed explicitly.
+}
+
+/// Orchestrates the analysis stages over the library:
+///
+/// - Stage A′: quality (failed-frame tiers, aesthetics, face capture)
+///   over a 256 px rendition of every image — and the exact-duplicate
+///   hash from that same rendition, so no second pass.
+/// - Candidate metadata: adjustment data and EXIF exposure bias, only
+///   for the near-duplicate and bracket candidates the guards affect.
+/// - Stage B: feature prints for near-duplicate candidates only, cached
+///   on disk with the revision guard.
+///
+/// Every stage pauses on thermal pressure and Low Power Mode, stops
+/// when cancelled, and never touches the network (`AssetImageProvider`
+/// enforces that on every request).
+@MainActor
+@Observable
+final class AnalysisCoordinator {
+    nonisolated static let backgroundTaskIdentifier = "com.junyizhang.pickroom.fingerprint"
+
+    let powerGate: PowerGate
+    private let imageProvider: AssetImageProvider
+    private let fingerprinter = VisionFingerprinter()
+    private let hasher = ContentHasher()
+    private let storageDirectory: URL
+
+    private(set) var isAnalysing = false
+    /// 0…1 over the current analysis batch.
+    private(set) var progress: Double = 0
+    private(set) var lastMessage: String?
+
+    private var fingerprintCache: FingerprintCache
+    private var metadataCache: CandidateMetadataCache
+
+    init(
+        powerGate: PowerGate,
+        imageProvider: AssetImageProvider,
+        storageDirectory: URL? = nil
+    ) {
+        self.powerGate = powerGate
+        self.imageProvider = imageProvider
+        self.storageDirectory = storageDirectory ?? Self.defaultStorageDirectory()
+        fingerprintCache = FingerprintCache.load(
+            from: self.storageDirectory.appendingPathComponent("fingerprints.bin"),
+            parameters: VisionFingerprinter.parameters
+        )
+        metadataCache = CandidateMetadataCache.load(
+            from: self.storageDirectory.appendingPathComponent("candidate-metadata.plist")
+        )
+    }
+
+    private nonisolated static func defaultStorageDirectory() -> URL {
+        let support = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first
+            ?? FileManager.default.temporaryDirectory
+        let directory = support.appendingPathComponent("Pickroom", isDirectory: true)
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory
+    }
+
+    // MARK: - Stage A′ (quality) + exact duplicates
+
+    /// Analyses quality for every image not yet analysed and returns the
+    /// updated records. One 256 px render per asset serves the
+    /// failed-frame tiers, aesthetics, face capture *and* the exact
+    /// duplicate hash — no second pass over the library. Pauses on
+    /// thermal pressure and Low Power Mode, and stops when cancelled.
+    func analyseQuality(records: [AssetRecord]) async -> [AssetRecord] {
+        let pending = records.indices.filter {
+            records[$0].mediaType == .image && records[$0].quality == nil
+        }
+        guard !pending.isEmpty else { return records }
+        isAnalysing = true
+        progress = 0
+        defer { isAnalysing = false }
+
+        var updated = records
+        let analyzer = QualityAnalyzer()
+
+        for (done, position) in pending.enumerated() {
+            guard await waitWhilePaused("Paused — device is hot or in Low Power Mode") else {
+                return updated
+            }
+            let record = records[position]
+            let identifier = Self.identifier(record)
+            if let rendition = await imageProvider.analysisRendition(for: identifier) {
+                let result = await analyzer.analyzeFull(image: rendition)
+                updated[position].quality = result.quality
+                updated[position].aestheticsScore = result.aestheticsScore
+                updated[position].isUtility = result.isUtility
+                updated[position].faceCaptureQuality = result.faceCaptureQuality
+                updated[position].scoredFromStandIn = AssetImageProvider.isStandIn(rendition)
+                updated[position].contentHash = hasher.hash(
+                    image: rendition,
+                    pixelWidth: record.pixelWidth,
+                    pixelHeight: record.pixelHeight
+                )
+            }
+            progress = Double(done + 1) / Double(pending.count)
+            if done % 25 == 0 {
+                await Task.yield()
+            }
+        }
+        return updated
+    }
+
+    // MARK: - Candidate metadata (versions guard, bracket guard)
+
+    /// Reads the two facts PhotoKit does not put on `PHAsset`, only for
+    /// the assets the guards can affect:
+    ///
+    /// - adjustment data (the `versions` guard) for near-duplicate
+    ///   candidates;
+    /// - EXIF exposure bias (the bracket guard) for images shot within
+    ///   the bracket window of a neighbour.
+    ///
+    /// Results are cached per key and modification date, so a relaunch
+    /// does not re-read originals.
+    func readCandidateMetadata(records: [AssetRecord]) async -> [AssetRecord] {
+        let configuration = GroupEngineConfiguration()
+        let versionKeys = Set(Self.candidateRecords(from: records, includeFingerprinted: true).map(\.key))
+        let bracketKeys = Self.bracketCandidateKeys(records, configuration: configuration)
+        let targets = records.indices.filter {
+            versionKeys.contains(records[$0].key) || bracketKeys.contains(records[$0].key)
+        }
+        guard !targets.isEmpty else { return records }
+
+        var updated = records
+        var changed = false
+        for (done, position) in targets.enumerated() {
+            guard await waitWhilePaused("Paused — device is hot or in Low Power Mode") else { break }
+            let record = records[position]
+            let identifier = Self.identifier(record)
+            var entry = metadataCache.entry(for: record) ?? .init()
+
+            if versionKeys.contains(record.key), entry.hasAdjustments == nil {
+                entry.hasAdjustments = PhotoKitLibrary.hasAdjustments(identifier: identifier)
+                changed = true
+            }
+            if bracketKeys.contains(record.key), entry.exposureBiasChecked != true {
+                entry.exposureBias = await PhotoKitLibrary.exposureBias(identifier: identifier)
+                entry.exposureBiasChecked = true
+                changed = true
+            }
+            metadataCache.set(entry, for: record)
+            updated[position].isEditedVersion = entry.hasAdjustments ?? false
+            updated[position].exposureBias = entry.exposureBias
+
+            if done % 25 == 0 {
+                if changed { persistMetadataCache() }
+                await Task.yield()
+            }
+        }
+        if changed { persistMetadataCache() }
+        return updated
+    }
+
+    /// Dated, non-utility images with a neighbour inside the bracket
+    /// window — the only assets a bracket can contain.
+    nonisolated static func bracketCandidateKeys(
+        _ records: [AssetRecord],
+        configuration: GroupEngineConfiguration
+    ) -> Set<String> {
+        let dated = records
+            .filter { record in
+                guard let date = record.capturedAt else { return false }
+                return record.mediaType == .image
+                    && !record.isExpiredUtilityByMetadata
+                    && date > configuration.degenerateDateCutoff
+            }
+            .sorted { $0.capturedAt! < $1.capturedAt! }
+        guard dated.count > 1 else { return [] }
+        var keys = Set<String>()
+        for index in 1..<dated.count {
+            let gap = dated[index].capturedAt!.timeIntervalSince(dated[index - 1].capturedAt!)
+            if gap <= configuration.bracketMaxGap {
+                keys.insert(dated[index].key)
+                keys.insert(dated[index - 1].key)
+            }
+        }
+        return keys
+    }
+
+    // MARK: - Stage B (fingerprints)
+
+    /// Fingerprints the near-duplicate candidate set and returns
+    /// updated records. Candidates come from the core's Stage A output:
+    /// only assets already placed close together in time, a few
+    /// thousand in a 50,000-asset library — never the whole thing.
+    func fingerprintCandidates(records: [AssetRecord]) async -> [AssetRecord] {
+        isAnalysing = true
+        progress = 0
+        defer { isAnalysing = false }
+
+        let candidates = candidateRecords(records)
+        guard !candidates.isEmpty else { return records }
+
+        var updated = records
+        let byKey = Dictionary(uniqueKeysWithValues: records.enumerated().map {
+            ($1.key, $0)
+        })
+        var done = 0
+
+        for record in candidates {
+            // Thermal and Low Power throttling, pausable and resumable.
+            guard await waitWhilePaused(
+                "Fingerprinting paused — will resume when the device cools down"
+            ) else { return persistAndReturn(updated) }
+
+            // Cache first: same key, same modification date, same pinned
+            // revision and crop option → never recomputed.
+            if let cached = fingerprintCache.fingerprint(
+                forKey: record.key,
+                modificationDate: record.modificationDate
+            ) {
+                if let position = byKey[record.key] {
+                    updated[position].fingerprint = cached
+                }
+                done += 1
+                progress = Double(done) / Double(candidates.count)
+                continue
+            }
+
+            let identifier = Self.identifier(record)
+            guard let rendition = await imageProvider.analysisRendition(for: identifier) else {
+                done += 1
+                continue
+            }
+            do {
+                let print = try await fingerprinter.fingerprint(for: rendition)
+                fingerprintCache.upsert(
+                    .init(
+                        key: record.key,
+                        modificationDate: record.modificationDate,
+                        fingerprint: print
+                    )
+                )
+                if let position = byKey[record.key] {
+                    updated[position].fingerprint = print
+                }
+            } catch {
+                // A failed fingerprint just means no near-duplicate
+                // evidence for this asset; the engine treats missing
+                // prints as "no group".
+                lastMessage = "Fingerprint failed for one asset"
+            }
+            done += 1
+            progress = Double(done) / Double(candidates.count)
+            if done % 10 == 0 {
+                persistFingerprintCache()
+                await Task.yield()
+            }
+        }
+        return persistAndReturn(updated)
+    }
+
+    /// Stage A time-adjacency: assets that sit within the candidate
+    /// window of another dated asset, excluding videos, screenshots and
+    /// already-grouped bursts (bursts are grouped by identifier and
+    /// don't need prints).
+    nonisolated static func candidateRecords(
+        from records: [AssetRecord],
+        configuration: GroupEngineConfiguration = GroupEngineConfiguration(),
+        includeFingerprinted: Bool = false
+    ) -> [AssetRecord] {
+        var candidateKeys = Set<String>()
+        for (a, b) in CandidateSelection.candidatePairs(
+            records,
+            sessionGap: configuration.sessionGap,
+            window: configuration.candidateWindow,
+            dateCutoff: configuration.degenerateDateCutoff
+        ) {
+            candidateKeys.insert(records[a].key)
+            candidateKeys.insert(records[b].key)
+        }
+        return records.filter { record in
+            candidateKeys.contains(record.key)
+                && record.mediaType == .image
+                && !record.isExpiredUtilityByMetadata
+                && record.burstIdentifier == nil
+                && (includeFingerprinted || record.fingerprint == nil) // only the missing ones
+        }
+    }
+
+    private func candidateRecords(_ records: [AssetRecord]) -> [AssetRecord] {
+        Self.candidateRecords(from: records)
+    }
+
+    // MARK: - Helpers
+
+    nonisolated static func identifier(_ record: AssetRecord) -> String {
+        String(record.key.dropFirst("photos:".count))
+    }
+
+    /// Waits out thermal pressure and Low Power Mode. Returns `false`
+    /// when the surrounding task was cancelled — the caller stops.
+    private func waitWhilePaused(_ message: String) async -> Bool {
+        while powerGate.isPaused {
+            lastMessage = message
+            try? await Task.sleep(for: .seconds(2))
+            if Task.isCancelled { return false }
+        }
+        return !Task.isCancelled
+    }
+
+    // MARK: - Cache persistence
+
+    private func persistMetadataCache() {
+        try? metadataCache.save(
+            to: storageDirectory.appendingPathComponent("candidate-metadata.plist")
+        )
+    }
+
+    private func persistFingerprintCache() {
+        try? fingerprintCache.save(
+            to: storageDirectory.appendingPathComponent("fingerprints.bin")
+        )
+    }
+
+    private func persistAndReturn(_ records: [AssetRecord]) -> [AssetRecord] {
+        persistFingerprintCache()
+        return records
+    }
+
+    // MARK: - Background task
+
+    /// Registers the overnight `BGProcessingTask`: fingerprinting while
+    /// charging, ideally on the charger overnight so no progress bar is
+    /// ever seen. Call from the app's launch path.
+    nonisolated static func registerBackgroundTask(handler: @escaping @Sendable () async -> Void) {
+        BGTaskScheduler.shared.register(
+            forTaskWithIdentifier: backgroundTaskIdentifier,
+            using: nil
+        ) { task in
+            guard let processingTask = task as? BGProcessingTask else {
+                task.setTaskCompleted(success: false)
+                return
+            }
+            // BGTask types predate Sendable; the task object is used
+            // only for completion reporting on this serial path.
+            nonisolated(unsafe) let completion = processingTask
+            let work = Task {
+                await handler()
+                completion.setTaskCompleted(success: true)
+            }
+            processingTask.expirationHandler = {
+                work.cancel()
+            }
+        }
+    }
+
+    nonisolated static func scheduleBackgroundTask() {
+        let request = BGProcessingTaskRequest(identifier: backgroundTaskIdentifier)
+        request.requiresNetworkConnectivity = false
+        request.requiresExternalPower = true
+        do {
+            try BGTaskScheduler.shared.submit(request)
+        } catch {
+            // Scheduling can fail (simulator, background refresh off);
+            // foreground fingerprinting still works, just slower.
+        }
+    }
+}
+
+/// Per-asset facts read from resources and EXIF for the guards, keyed by
+/// asset key and modification date so an edit invalidates them. Small:
+/// only near-duplicate and bracket candidates are ever stored.
+struct CandidateMetadataCache: Sendable {
+    struct Entry: Codable, Hashable, Sendable {
+        var hasAdjustments: Bool?
+        var exposureBias: Double?
+        var exposureBiasChecked: Bool?
+    }
+
+    private var entries: [String: Entry] = [:]
+
+    static func load(from url: URL) -> CandidateMetadataCache {
+        guard
+            let data = try? Data(contentsOf: url),
+            let entries = try? PropertyListDecoder().decode([String: Entry].self, from: data)
+        else { return CandidateMetadataCache() }
+        var cache = CandidateMetadataCache()
+        cache.entries = entries
+        return cache
+    }
+
+    func save(to url: URL) throws {
+        let encoder = PropertyListEncoder()
+        encoder.outputFormat = .binary
+        try encoder.encode(entries).write(to: url, options: .atomic)
+    }
+
+    func entry(for record: AssetRecord) -> Entry? {
+        entries[Self.cacheKey(record)]
+    }
+
+    mutating func set(_ entry: Entry, for record: AssetRecord) {
+        entries[Self.cacheKey(record)] = entry
+    }
+
+    private static func cacheKey(_ record: AssetRecord) -> String {
+        "\(record.key)|\(record.modificationDate?.timeIntervalSinceReferenceDate ?? 0)"
+    }
+}

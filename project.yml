@@ -1,0 +1,69 @@
+name: Pickroom
+options:
+  bundleIdPrefix: com.junyizhang
+  deploymentTarget:
+    iOS: "18.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    CODE_SIGN_STYLE: Automatic
+    TARGETED_DEVICE_FAMILY: "1,2"
+packages:
+  PickroomCore:
+    path: Packages/PickroomCore
+targets:
+  Pickroom:
+    type: application
+    platform: iOS
+    sources:
+      - path: Pickroom
+    dependencies:
+      - package: PickroomCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.junyizhang.PickroomiOS
+        PRODUCT_NAME: Pickroom
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Pickroom
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
+        INFOPLIST_KEY_UISupportedInterfaceOrientations~ipad: UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight
+        INFOPLIST_KEY_NSPhotoLibraryUsageDescription: "Pickroom analyses your photo library on this device to surface photos with no reason to exist — blurred frames, bursts, expired screenshots, exact duplicates. Deletion needs your confirmation and moves photos to Recently Deleted. Photos never leave the device — analysis works offline and never downloads originals from the network."
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_STRICT_CONCURRENCY: complete
+        ENABLE_USER_SCRIPT_SANDBOXING: YES
+        DEVELOPMENT_TEAM: ""
+        CODE_SIGN_IDENTITY: "-"
+    info:
+      path: Pickroom/Info.plist
+      properties:
+        PHPhotoLibraryPreventAutomaticLimitedAccessAlert: true
+        BGTaskSchedulerPermittedIdentifiers:
+          - com.junyizhang.pickroom.fingerprint
+        UIBackgroundModes:
+          - processing
+        ITSAppUsesNonExemptEncryption: false
+  PickroomTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: PickroomTests
+    dependencies:
+      - target: Pickroom
+      - package: PickroomCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.junyizhang.PickroomiOSTests
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_STRICT_CONCURRENCY: complete
+schemes:
+  Pickroom:
+    build:
+      targets:
+        Pickroom: all
+        PickroomTests: [test]
+    test:
+      targets:
+        - PickroomTests
