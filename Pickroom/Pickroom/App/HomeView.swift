@@ -11,13 +11,16 @@ struct HomeView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.scenePhase) private var scenePhase
     @State private var scrolledPastHeader = false
+    @State private var showingSituation = false
+    /// The situation already explained. A different one (say iCloud
+    /// Photos was turned on since) is explained again, once.
+    @AppStorage("situationShown") private var situationShown = ""
 
     var body: some View {
         ScrollView {
             VStack(spacing: 0) {
                 header
                 VStack(spacing: 18) {
-                    situationSection
                     triageSection
                     countsSection
                     pendingSection
@@ -45,6 +48,17 @@ struct HomeView: View {
                 .opacity(scrolledPastHeader ? 1 : 0)
         }
         .toolbar(.hidden, for: .navigationBar)
+        // The storage situation, told once as a dialog rather than a
+        // panel that sits on Home forever.
+        .campDialog(
+            isPresented: $showingSituation,
+            title: model.diagnosis.title,
+            message: model.diagnosis.advice
+                + "\n\nWith iCloud Photos on there is one library: deleting here deletes everywhere.",
+            actions: situationActions
+        )
+        .onAppear(perform: showSituationIfNew)
+        .onChange(of: model.isLoadingLibrary) { showSituationIfNew() }
         // Refresh the Recently Deleted figure on appear and on return
         // from Photos, rather than behind a pull-to-refresh spinner.
         .task {
@@ -79,36 +93,27 @@ struct HomeView: View {
 
     // MARK: - Sections
 
-    /// The three-way diagnosis, with the Optimise Storage advice where
-    /// it applies and its honest limits.
-    private var situationSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            CampTag(text: "Your situation")
-            HStack(spacing: 12) {
-                IconBadge(systemImage: "externaldrive.fill", fill: Camp.lake)
-                Text(model.diagnosis.title)
-                    .font(Camp.display(.title3, weight: .semibold))
-                    .foregroundStyle(Camp.ink)
-            }
-            Text(model.diagnosis.advice)
-                .font(.subheadline)
-                .foregroundStyle(Camp.muted)
-
-            if model.diagnosis == .iCloudFullCopies {
-                Link(
-                    "Open Settings → Photos",
-                    destination: URL(string: UIApplication.openSettingsURLString)!
-                )
-                .font(.subheadline.weight(.heavy))
-                .foregroundStyle(Camp.keep)
-            }
-
-            DashedDivider()
-            Text("With iCloud Photos on there is one library: deleting here deletes everywhere, and Recently Deleted syncs too. There is no remove-from-this-phone-only.")
-                .font(.footnote)
-                .foregroundStyle(Camp.muted)
+    private var situationActions: [CampDialogAction] {
+        var actions: [CampDialogAction] = []
+        if model.diagnosis == .iCloudFullCopies {
+            actions.append(CampDialogAction(title: "Open Settings → Photos") {
+                if let url = URL(string: UIApplication.openSettingsURLString) {
+                    UIApplication.shared.open(url)
+                }
+            })
         }
-        .campPanel(padding: 18)
+        actions.append(CampDialogAction(title: "Got it", role: actions.isEmpty ? .primary : .cancel))
+        return actions
+    }
+
+    /// Once the library has loaded the diagnosis is final; show it if
+    /// this situation hasn't been explained yet.
+    private func showSituationIfNew() {
+        guard model.canTriage, !model.isLoadingLibrary, !model.records.isEmpty else { return }
+        let key = String(describing: model.diagnosis)
+        guard situationShown != key else { return }
+        situationShown = key
+        showingSituation = true
     }
 
     private var triageSection: some View {
@@ -143,28 +148,12 @@ struct HomeView: View {
                 verticalPadding: 16
             ))
 
-            Text("One gesture per decision. Nothing leaves your library until you commit.")
+            Text("Nothing leaves your library until you commit.")
                 .font(.footnote)
                 .foregroundStyle(Camp.muted)
                 .multilineTextAlignment(.center)
 
-            if model.analysis.isAnalysing {
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack(spacing: 10) {
-                        IconBadge(systemImage: "sparkle.magnifyingglass", fill: Camp.later, foreground: Camp.laterInk, size: 30)
-                        Text(model.analysis.lastMessage ?? "Analysing on this device…")
-                            .font(.subheadline.weight(.bold))
-                            .foregroundStyle(Camp.ink)
-                        Spacer(minLength: 0)
-                        Text(model.analysis.progress, format: .percent.precision(.fractionLength(0)))
-                            .font(Camp.display(.callout, weight: .semibold))
-                            .foregroundStyle(Camp.laterEdge)
-                            .monospacedDigit()
-                    }
-                    CampProgressBar(value: model.analysis.progress)
-                }
-                .campPanel(padding: 14)
-            }
+            scanPanel
 
             if model.powerGate.isPaused {
                 HStack(spacing: 10) {
@@ -184,8 +173,80 @@ struct HomeView: View {
         }
     }
 
-    /// What the engine found: counts by category, video counted as its
-    /// own thing and otherwise left alone.
+    /// The library scan: live counts while analysing, otherwise when it
+    /// last ran and a Rescan button. Saved results mean a rescan only
+    /// analyses new and edited photos.
+    private var scanPanel: some View {
+        let analysis: AnalysisCoordinator = model.analysis
+        let busy = model.isLoadingLibrary || model.isRescanning
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                IconBadge(systemImage: "sparkle.magnifyingglass", fill: Camp.later, foreground: Camp.laterInk, size: 30)
+                VStack(alignment: .leading, spacing: 2) {
+                    if analysis.isAnalysing {
+                        Text(analysis.lastMessage ?? "Analysing on this device…")
+                            .font(.subheadline.weight(.bold))
+                            .foregroundStyle(Camp.ink)
+                        Text("\(analysis.processedCount.formatted()) of \(analysis.pendingCount.formatted()) new photos")
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(Camp.muted)
+                            .monospacedDigit()
+                    } else if busy {
+                        Text("Reading your library…")
+                            .font(.subheadline.weight(.bold))
+                            .foregroundStyle(Camp.ink)
+                    } else {
+                        Text("^[\(model.summary.totalAssets) item](inflect: true) scanned")
+                            .font(.subheadline.weight(.bold))
+                            .foregroundStyle(Camp.ink)
+                            .monospacedDigit()
+                        if let date = model.lastScanDate {
+                            Text("Last scan \(date, format: .relative(presentation: .named))")
+                                .font(.caption.weight(.bold))
+                                .foregroundStyle(Camp.muted)
+                        }
+                    }
+                }
+                Spacer(minLength: 0)
+                if analysis.isAnalysing {
+                    Text(analysis.progress, format: .percent.precision(.fractionLength(0)))
+                        .font(Camp.display(.callout, weight: .semibold))
+                        .foregroundStyle(Camp.laterEdge)
+                        .monospacedDigit()
+                } else {
+                    Button {
+                        Task { await model.rescan() }
+                    } label: {
+                        if busy {
+                            CampSpinner(color: .white)
+                        } else {
+                            Label("Rescan", systemImage: "arrow.clockwise")
+                        }
+                    }
+                    .buttonStyle(ChunkyButtonStyle(
+                        fill: Camp.wood,
+                        edge: Camp.woodEdge,
+                        cornerRadius: 14,
+                        font: Camp.display(.subheadline, weight: .semibold),
+                        horizontalPadding: 14,
+                        verticalPadding: 8
+                    ))
+                    .disabled(busy)
+                    .accessibilityLabel("Rescan library")
+                }
+            }
+            if analysis.isAnalysing {
+                CampProgressBar(value: analysis.progress)
+                Text("Results are saved as they come — you can leave and come back without starting over.")
+                    .font(.caption)
+                    .foregroundStyle(Camp.muted)
+            }
+        }
+        .campPanel(padding: 14)
+    }
+
+    /// What the engine found: counts by category. Each tile opens the
+    /// category as a grid to look through and act on.
     private var countsSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("What's in your library")
@@ -196,32 +257,47 @@ struct HomeView: View {
                 columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)],
                 spacing: 16
             ) {
-                tile("Photos and videos", count: model.summary.totalAssets, symbol: "photo.fill", color: Camp.lake)
-                tile("Failed frames", count: model.summary.failedFrameCount, symbol: "camera.metering.unknown", color: Camp.failed)
-                tile("Exact duplicates", count: model.summary.exactDuplicateCount, symbol: "square.on.square.fill", color: Camp.duplicate)
-                tile("Screenshots", count: model.summary.screenshotCount, symbol: "iphone", color: Camp.screenshot)
-                tile("Screen recordings", count: model.summary.screenRecordingCount, symbol: "record.circle", color: Camp.recording)
-                tile("Videos · left alone", count: model.summary.videoCount, symbol: "video.fill", color: Camp.stone)
+                ForEach(LibraryCategory.allCases) { category in
+                    NavigationLink {
+                        LibraryCategoryView(category: category)
+                    } label: {
+                        tile(category)
+                    }
+                    .buttonStyle(TileButtonStyle())
+                }
             }
         }
         .opacity(model.isLoadingLibrary ? 0.5 : 1)
     }
 
-    private func tile(_ title: String, count: Int, symbol: String, color: Color) -> some View {
+    private func tile(_ category: LibraryCategory) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            IconBadge(systemImage: symbol, fill: color, size: 34)
-            Text(count.formatted())
+            HStack {
+                IconBadge(systemImage: category.symbol, fill: category.color, size: 34)
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.footnote.weight(.heavy))
+                    .foregroundStyle(Camp.panelEdge)
+            }
+            Text(model.count(of: category).formatted())
                 .font(Camp.display(.title, weight: .semibold))
                 .foregroundStyle(Camp.ink)
                 .monospacedDigit()
                 .lineLimit(1)
                 .minimumScaleFactor(0.6)
-            Text(title)
+            Text(tileCaption(category))
                 .font(.footnote.weight(.bold))
                 .foregroundStyle(Camp.muted)
+                .multilineTextAlignment(.leading)
         }
         .campPanel(cornerRadius: 18, padding: 14)
         .accessibilityElement(children: .combine)
+    }
+
+    private func tileCaption(_ category: LibraryCategory) -> String {
+        guard category == .videos else { return category.title }
+        let total = model.totalSize(of: model.keys(in: .videos))
+        return total > 0 ? "Videos · \(total.formatted(.byteCount(style: .file)))" : category.title
     }
 
     /// The live "pending in Recently Deleted" figure, with the link to
@@ -320,5 +396,14 @@ struct PermissionView: View {
         .padding(.horizontal, 24)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Camp.paper)
+    }
+}
+
+/// A home tile presses down onto its edge like the other camp buttons.
+private struct TileButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .offset(y: configuration.isPressed ? 3 : 0)
+            .animation(.spring(duration: 0.12), value: configuration.isPressed)
     }
 }

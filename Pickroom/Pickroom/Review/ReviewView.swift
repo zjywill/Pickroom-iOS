@@ -54,21 +54,8 @@ struct ReviewView: View {
                 .cancel(),
             ]
         )
-        .campNavigationBar("Review") {
-            EmptyView()
-        } trailing: {
-            NavigationLink {
-                if let deck = model.deck {
-                    DeckView(deck: deck)
-                } else {
-                    CampLoadingView(message: "Loading your library…")
-                }
-            } label: {
-                Image(systemName: "rectangle.stack.fill")
-            }
-            .buttonStyle(RoundChunkyButtonStyle(fill: Camp.keep, edge: Camp.keepEdge, size: 44))
-            .accessibilityLabel("Triage")
-        }
+        // Triage has its own tab; no second way in from here.
+        .campNavigationBar("Review")
     }
 
     // MARK: - Sets
@@ -83,10 +70,24 @@ struct ReviewView: View {
                     .foregroundStyle(Camp.muted)
                     .padding(.horizontal, 4)
 
+                if model.groups.isEmpty {
+                    VStack(spacing: 14) {
+                        Raccoon(mood: .content)
+                            .frame(width: 84)
+                        Text(model.analysis.isAnalysing
+                             ? "Still analysing — sets of similar photos appear here as they're found."
+                             : "No sets of similar photos found.")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(Camp.muted)
+                            .multilineTextAlignment(.center)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 40)
+                }
                 ForEach(model.groups) { group in
                     HStack(spacing: 10) {
                         NavigationLink {
-                            GroupDetailView(group: group)
+                            GroupDetailView(groups: model.groups, startID: group.id)
                         } label: {
                             HStack(spacing: 10) {
                                 SetRow(group: group)
@@ -125,13 +126,11 @@ struct ReviewView: View {
 
     private var picksGrid: some View {
         let picks = model.records.filter { model.deck?.decisions[$0.key] == .pick }
-        return ScrollView {
-            if picks.isEmpty {
-                emptyText("No picks yet. Long-press a card, then choose a member as the keeper.")
-            } else {
-                PhotoGrid(keys: picks.map(\.key), decisionFor: { _ in .pick })
-                    .padding(.horizontal)
-            }
+        return AssetBrowser(
+            keys: picks.map(\.key),
+            mode: .pick,
+            emptyMessage: "No picks yet. Open a set from a card and choose its keeper."
+        ) {
             footnote("Picks live on this device only — they don't sync to the Mac app, though deletions do.")
         }
     }
@@ -139,78 +138,34 @@ struct ReviewView: View {
     // MARK: - Marked for deletion
 
     private var rejectsGrid: some View {
-        let rejects = model.commitCandidates
-        return ScrollView {
-            if rejects.isEmpty {
-                emptyText("Nothing marked for deletion.")
-            } else {
-                PhotoGrid(
-                    keys: rejects,
-                    decisionFor: { _ in .reject },
-                    unmark: { key in model.deck?.unmark(key: key) }
-                )
-                .padding(.horizontal)
-            }
-            footnote("Touch and hold a photo to keep it instead. Nothing is deleted until you commit from the triage deck.")
+        AssetBrowser(
+            keys: model.commitCandidates,
+            emptyMessage: "Nothing marked for deletion."
+        ) {
+            footnote("Changed your mind? Tap a photo to keep it. Nothing is deleted until you commit from the triage deck.")
         }
     }
 
     // MARK: - Video
 
-    /// Video: counted, filterable, and otherwise left alone — no
-    /// grouping, no best shot, no deletion proposals. Viewing happens
-    /// in Photos.
+    /// Video: the engine never judges one — no grouping, no best shot,
+    /// no deletion proposals — but the user can play any video here
+    /// and mark the ones they want gone.
     private var videoList: some View {
-        let videos = model.records.filter(\.isContainedVideo)
-        return ScrollView {
-            LazyVStack(alignment: .leading, spacing: 12) {
-                if videos.isEmpty {
-                    emptyText("No videos.")
-                }
-                ForEach(videos) { record in
-                    HStack {
-                        AssetRow(record: record)
-                        Spacer()
-                        Link(destination: URL(string: "photos-redirect://")!) {
-                            Text("Photos")
-                        }
-                        .buttonStyle(ChunkyButtonStyle(
-                            fill: Camp.wood,
-                            edge: Camp.woodEdge,
-                            cornerRadius: 14,
-                            font: .caption.weight(.heavy),
-                            horizontalPadding: 12,
-                            verticalPadding: 7
-                        ))
-                    }
-                    .campPanel(cornerRadius: 18, padding: 12)
-                }
-                footnote("A poster frame tells you almost nothing about a video, so Pickroom never judges one. Screen recordings are the exception — they live with expired screenshots.")
-            }
-            .padding(.horizontal)
-            .padding(.bottom, 24)
+        AssetBrowser(
+            keys: model.videosBiggestFirst(),
+            emptyMessage: "No videos."
+        ) {
+            footnote("A poster frame tells you almost nothing about a video, so Pickroom never suggests deleting one. Biggest first. Tap to mark; ⤢ to play.")
         }
-    }
-
-    private func emptyText(_ text: String) -> some View {
-        VStack(spacing: 14) {
-            Raccoon(mood: .content)
-                .frame(width: 84)
-            Text(text)
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(Camp.muted)
-                .multilineTextAlignment(.center)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 40)
-        .padding(.horizontal)
     }
 
     private func footnote(_ text: String) -> some View {
         Text(text)
             .font(.footnote)
             .foregroundStyle(Camp.muted)
-            .padding()
+            .padding(.horizontal, 4)
+            .padding(.top, 4)
     }
 }
 
@@ -249,190 +204,113 @@ private struct SetRow: View {
     }
 }
 
-/// A thumbnail grid of assets with decision badges. When `unmark` is
-/// given, each photo offers "Keep this photo" — the way back for a
-/// deletion decided in an earlier session, beyond the undo history.
-private struct PhotoGrid: View {
-    let keys: [String]
-    let decisionFor: (String) -> PhotoDecision?
-    var flagged: Set<String> = []
-    var unmark: ((String) -> Void)?
-
-    var body: some View {
-        LazyVGrid(
-            columns: [GridItem(.adaptive(minimum: 96), spacing: 10)],
-            spacing: 12
-        ) {
-            ForEach(keys, id: \.self) { key in
-                let cell = GridThumb(
-                    assetKey: key,
-                    decision: decisionFor(key),
-                    isFlagged: flagged.contains(key)
-                )
-                if let unmark, decisionFor(key) == .reject {
-                    // Touch and hold keeps the photo straight away.
-                    cell
-                        .onLongPressGesture(minimumDuration: 0.4) {
-                            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                            withAnimation(.snappy) { unmark(key) }
-                        }
-                        .accessibilityAction(named: "Keep this photo") { unmark(key) }
-                } else {
-                    cell
-                }
-            }
-        }
-    }
-}
-
-private struct GridThumb: View {
-    @Environment(AppModel.self) private var model
-    let assetKey: String
-    let decision: PhotoDecision?
-    let isFlagged: Bool
-
-    @State private var image: UIImage?
-
-    var body: some View {
-        Color.clear
-            .aspectRatio(1, contentMode: .fit)
-            .overlay {
-                if let image {
-                    Image(uiImage: image)
-                        .resizable()
-                        .scaledToFill()
-                } else {
-                    Rectangle().fill(Camp.sand)
-                }
-            }
-            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .strokeBorder(ringColor, lineWidth: 3)
-            )
-            .background(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(Camp.panelEdge)
-                    .offset(y: 3)
-            )
-            .overlay(alignment: .bottomTrailing) { badge.padding(5) }
-            .task(id: assetKey) {
-                let identifier = String(assetKey.dropFirst("photos:".count))
-                image = await model.imageProvider.thumbnail(for: identifier)
-            }
-            .accessibilityElement()
-            .accessibilityLabel(accessibilityText)
-    }
-
-    @ViewBuilder
-    private var badge: some View {
-        switch decision {
-        case .pick?:
-            DecisionMark(kind: .keeper)
-        case .reject?:
-            DecisionMark(kind: .marked)
-        default:
-            if isFlagged {
-                DecisionMark(kind: .flagged)
-            }
-        }
-    }
-
-    private var ringColor: Color {
-        switch decision {
-        case .pick?: Camp.keep
-        case .reject?: Camp.toss
-        default: .clear
-        }
-    }
-
-    private var accessibilityText: String {
-        switch decision {
-        case .pick?: "Keeper"
-        case .reject?: "Marked for deletion"
-        default: isFlagged ? "Flagged as clearly bad" : "Photo"
-        }
-    }
-}
-
-/// Simple asset row with thumbnail (videos).
-private struct AssetRow: View {
-    @Environment(AppModel.self) private var model
-    let record: AssetRecord
-
-    @State private var image: UIImage?
-
-    var body: some View {
-        HStack(spacing: 10) {
-            Group {
-                if let image {
-                    Image(uiImage: image)
-                        .resizable()
-                        .scaledToFill()
-                } else {
-                    Rectangle().fill(Camp.sand)
-                }
-            }
-            .frame(width: 44, height: 44)
-            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(record.fileName ?? record.key)
-                    .font(.subheadline.weight(.bold))
-                    .foregroundStyle(Camp.ink)
-                    .lineLimit(1)
-                if let date = record.capturedAt {
-                    Text(date.formatted(date: .abbreviated, time: .omitted))
-                        .font(.caption)
-                        .foregroundStyle(Camp.muted)
-                }
-            }
-        }
-        .task(id: record.key) {
-            let identifier = String(record.key.dropFirst("photos:".count))
-            image = await model.imageProvider.thumbnail(for: identifier)
-        }
-    }
-}
-
-/// Per-group detail: every member as a grid, with the app's flags and
-/// the user's decisions. Marked members can be kept from here.
+/// Per-group detail from the Sets list: the shared set page, acting on
+/// decisions directly, with previous / next through the list. "Keep
+/// this · toss the rest" decides the set and moves on to the next
+/// undecided one — undo on the toast brings it back.
 private struct GroupDetailView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
-    let group: PhotoGroup
+    /// The list as it was when opened, so the order holds while sets
+    /// get decided (their live state is looked up by id).
+    let groups: [PhotoGroup]
+    @State private var currentID: String
+    @State private var toast: BrowserToast?
+
+    init(groups: [PhotoGroup], startID: String) {
+        self.groups = groups
+        _currentID = State(initialValue: startID)
+    }
+
+    private var index: Int { groups.firstIndex { $0.id == currentID } ?? 0 }
+
+    /// The live group (fresh analysis, current state), falling back to
+    /// the snapshot.
+    private func live(_ id: String) -> PhotoGroup? {
+        model.groups.first { $0.id == id } ?? groups.first { $0.id == id }
+    }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
-                CampTag(text: group.kind.title)
-                Text(group.headline)
-                    .font(Camp.display(.title2, weight: .semibold))
-                    .foregroundStyle(Camp.ink)
-                if let span = group.span {
-                    Text(span.start.formatted(date: .abbreviated, time: .shortened))
-                        .font(.footnote.weight(.bold))
-                        .foregroundStyle(Camp.muted)
-                }
-                PhotoGrid(
-                    keys: group.memberKeys,
-                    decisionFor: { model.deck?.decisions[$0] },
-                    flagged: Set(group.flaggedKeys),
-                    unmark: { key in model.deck?.unmark(key: key) }
+        VStack(spacing: 0) {
+            if let group = live(currentID) {
+                SetPage(
+                    group: group,
+                    mode: .toss,
+                    onDecided: { snapshot in decided(group, snapshot: snapshot) },
+                    externalToast: $toast
                 )
-                if !group.flaggedKeys.isEmpty {
-                    Text("\(group.flaggedKeys.count) of \(group.memberKeys.count) are flagged as clearly bad (○). The default action removes exactly these; ✕ marks what you chose to delete.")
-                        .font(.footnote)
-                        .foregroundStyle(Camp.muted)
-                        .campPanel(padding: 14)
-                        .padding(.top, 6)
-                }
+                .id(currentID)
+                .transition(.asymmetric(
+                    insertion: .move(edge: .trailing).combined(with: .opacity),
+                    removal: .move(edge: .leading).combined(with: .opacity)
+                ))
             }
-            .padding()
+            pager
         }
+        .animation(.snappy, value: currentID)
         .background(Camp.paper)
-        .campNavigationBar(group.kind.title) {
+        .campNavigationBar(live(currentID)?.kind.title ?? "Set") {
             CampBarButton(kind: .back) { dismiss() }
+        }
+    }
+
+    /// ‹ previous · position · next ›
+    private var pager: some View {
+        HStack(spacing: 12) {
+            Button {
+                go(to: index - 1)
+            } label: {
+                Image(systemName: "chevron.left")
+            }
+            .buttonStyle(RoundChunkyButtonStyle(fill: Camp.cream, edge: Camp.panelEdge, foreground: Camp.ink, size: 46))
+            .disabled(index == 0)
+            .accessibilityLabel("Previous set")
+
+            Spacer()
+            Text("\(index + 1) of \(groups.count)")
+                .font(Camp.display(.subheadline, weight: .semibold))
+                .foregroundStyle(Camp.muted)
+                .monospacedDigit()
+            Spacer()
+
+            Button {
+                go(to: index + 1)
+            } label: {
+                Image(systemName: "chevron.right")
+            }
+            .buttonStyle(RoundChunkyButtonStyle(fill: Camp.cream, edge: Camp.panelEdge, foreground: Camp.ink, size: 46))
+            .disabled(index >= groups.count - 1)
+            .accessibilityLabel("Next set")
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 10)
+        .padding(.bottom, 8)
+        .background(Camp.paper.shadow(color: Camp.panelEdge.opacity(0.6), radius: 0, x: 0, y: -2))
+    }
+
+    private func go(to position: Int) {
+        guard groups.indices.contains(position) else { return }
+        currentID = groups[position].id
+    }
+
+    /// The set is decided: resolve it, raise the undo toast, and move to
+    /// the next undecided set after it (or back to the list).
+    private func decided(_ group: PhotoGroup, snapshot: DeckModel.DecisionSnapshot) {
+        let id = group.id
+        Task { await model.setGroupState(id: id, .resolved) }
+        toast = BrowserToast(
+            message: "Kept the best · ^[\(group.memberKeys.count - 1) other](inflect: true) marked",
+            snapshot: snapshot,
+            onUndo: {
+                Task { await model.setGroupState(id: id, .pending) }
+                currentID = id
+            }
+        )
+        let after = groups[(index + 1)...]
+        if let next = after.first(where: { live($0.id)?.state == .pending && $0.id != id }) {
+            currentID = next.id
+        } else {
+            dismiss()
         }
     }
 }

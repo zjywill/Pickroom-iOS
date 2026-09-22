@@ -15,6 +15,9 @@ struct CardModel: Identifiable, Hashable {
     var markedKeys: Set<String>
     /// Best-shot suggestion, with its plain-language reason.
     var suggestion: ShotScore?
+    /// The user changed this set's marks. From then on the keep-one
+    /// default never touches it again.
+    var userEdited = false
 
     var id: String { group.id }
 }
@@ -28,9 +31,9 @@ struct CardModel: Identifiable, Hashable {
 /// - swipe left — discard **exactly the marked members** (the app's
 ///   confident-bad frames by default)
 /// - swipe up — decide later (card goes to the back of the deck)
-/// - tap — inspect larger; long press — the whole group
+/// - tap — inspect larger; the "Whole set" button — every member
 ///
-/// Keep-all kinds (bracket, versions) never propose anything: swipe
+/// Keep-all kinds (bracket, session) never propose anything: swipe
 /// left resolves them as keep, because there is nothing they are
 /// allowed to discard.
 @MainActor
@@ -146,11 +149,32 @@ final class DeckModel {
     }
 
     /// Swipe left — discard the marked members. On keep-all kinds
-    /// (bracket, versions) and on cards whose marks were all cleared,
+    /// (bracket, session) and on cards whose marks were all cleared,
     /// this resolves as keep: those cards have nothing they are allowed
     /// to propose.
     func discard() {
         applySwipe(.discard)
+    }
+
+    /// The set page's "Next set": the marks on screen are the decision —
+    /// marked members are rejected, the rest kept — and the next set
+    /// comes up. Undo brings the set back.
+    func resolveCurrent() {
+        applySwipe(.resolve)
+    }
+
+    /// Replaces the current card's marks (the set page's bulk buttons
+    /// and "keep this, toss the rest"). A marked pick loses its pick.
+    func setMarks(_ keys: Set<String>) {
+        guard var card = currentCard else { return }
+        let marks = keys.intersection(card.group.memberKeys)
+        for key in marks where decisions[key] == .pick {
+            clearDecision(key)
+        }
+        card.markedKeys = marks
+        card.userEdited = true
+        replaceCurrentCard(card)
+        lightHaptic()
     }
 
     /// Swipe up — decide later. The card moves to the back of the deck;
@@ -185,6 +209,7 @@ final class DeckModel {
                 clearDecision(memberKey)
             }
         }
+        card.userEdited = true
         replaceCurrentCard(card)
         lightHaptic()
     }
@@ -233,6 +258,9 @@ final class DeckModel {
         }
         recordDecision(memberKey, .pick)
         card.markedKeys.remove(memberKey)
+        // Still the default proposal: it follows the new keeper — the
+        // new best ✓, the old best ✕.
+        proposeKeepOne(&card)
         replaceCurrentCard(card)
         commitHaptic()
     }
@@ -246,6 +274,108 @@ final class DeckModel {
         for index in cards.indices { cards[index].markedKeys.remove(key) }
         for index in laterQueue.indices { laterQueue[index].markedKeys.remove(key) }
         lightHaptic()
+    }
+
+    // MARK: - Batch decisions
+
+    /// Decisions as they were before a batch, for its undo. A key that
+    /// had no decision is stored as `.unreviewed`.
+    typealias DecisionSnapshot = [String: PhotoDecision]
+
+    /// Marks the selected assets for deletion from a browser (review
+    /// grids, library categories, videos). The user's own explicit
+    /// choice, so favourites and videos are allowed; assets PhotoKit
+    /// cannot delete are skipped. Replaces any pick — the latest
+    /// explicit gesture wins.
+    @discardableResult
+    func markForDeletion(keys: some Sequence<String>) -> DecisionSnapshot {
+        let deletable = keys.filter { records[$0]?.sourceType.isDeletable == true }
+        return applyBatch(deletable.map { ($0, .reject) })
+    }
+
+    /// Withdraws pending deletions for the selected assets.
+    @discardableResult
+    func keep(keys: some Sequence<String>) -> DecisionSnapshot {
+        applyBatch(keys.filter { decisions[$0] == .reject }.map { ($0, .unreviewed) })
+    }
+
+    /// Withdraws picks for the selected assets.
+    @discardableResult
+    func removePicks(keys: some Sequence<String>) -> DecisionSnapshot {
+        applyBatch(keys.filter { decisions[$0] == .pick }.map { ($0, .unreviewed) })
+    }
+
+    /// Picks the given assets again (a pick withdrawn by mistake in the
+    /// Picks grid).
+    @discardableResult
+    func pick(keys: some Sequence<String>) -> DecisionSnapshot {
+        applyBatch(keys.filter { decisions[$0] != .pick }.map { ($0, .pick) })
+    }
+
+    /// Makes `key` the keeper of a set from outside the deck (the set
+    /// detail): a pick, and the pick moves off any sibling.
+    @discardableResult
+    func setKeeper(_ key: String, among members: [String]) -> DecisionSnapshot {
+        var updates = members
+            .filter { $0 != key && decisions[$0] == .pick }
+            .map { ($0, PhotoDecision.unreviewed) }
+        if decisions[key] != .pick { updates.append((key, .pick)) }
+        return applyBatch(updates)
+    }
+
+    /// "Keep this, toss the rest" from the set detail: `key` becomes the
+    /// keeper and every other member PhotoKit can delete is marked.
+    /// Favourites are spared, as in reduce-to-one — the user can still
+    /// tap one to mark it.
+    @discardableResult
+    func keepOnly(_ key: String, among members: [String]) -> DecisionSnapshot {
+        var updates: [(String, PhotoDecision)] = decisions[key] == .pick ? [] : [(key, .pick)]
+        for member in members where member != key {
+            if records[member]?.isProposable == true {
+                if decisions[member] != .reject { updates.append((member, .reject)) }
+            } else if decisions[member] == .pick {
+                updates.append((member, .unreviewed))
+            }
+        }
+        return applyBatch(updates)
+    }
+
+    /// Puts back the decisions a batch replaced.
+    func restore(_ snapshot: DecisionSnapshot) {
+        applyBatch(snapshot.map { ($0.key, $0.value) })
+    }
+
+    /// Applies decisions (`.unreviewed` clears) and keeps the cards'
+    /// marks in step, so the deck shows the same ✕ the grids do.
+    @discardableResult
+    private func applyBatch(_ updates: [(String, PhotoDecision)]) -> DecisionSnapshot {
+        guard !updates.isEmpty else { return [:] }
+        var previous: DecisionSnapshot = [:]
+        var saved: [String: PhotoDecision] = [:]
+        var removed: [String] = []
+        for (key, decision) in updates {
+            previous[key] = decisions[key] ?? .unreviewed
+            if decision == .unreviewed {
+                decisions[key] = nil
+                removed.append(key)
+            } else {
+                decisions[key] = decision
+                saved[key] = decision
+            }
+            let marked = decision == .reject
+            for index in cards.indices where cards[index].group.memberKeys.contains(key) {
+                if marked { cards[index].markedKeys.insert(key) } else { cards[index].markedKeys.remove(key) }
+            }
+            for index in laterQueue.indices where laterQueue[index].group.memberKeys.contains(key) {
+                if marked { laterQueue[index].markedKeys.insert(key) } else { laterQueue[index].markedKeys.remove(key) }
+            }
+        }
+        enqueueWrite {
+            if !removed.isEmpty { await self.persistence.removeDecisions(keys: removed) }
+            if !saved.isEmpty { await self.persistence.saveDecisions(saved) }
+        }
+        lightHaptic()
+        return previous
     }
 
     /// The live card for a group, for views that outlive a snapshot.
@@ -292,6 +422,7 @@ final class DeckModel {
             if let old = previous[group.id] {
                 card.markedKeys = old.markedKeys.intersection(group.memberKeys)
                 card.suggestion = old.suggestion
+                card.userEdited = old.userEdited
             }
             if deferredIDs.contains(group.id) {
                 deferred[group.id] = card
@@ -409,15 +540,61 @@ final class DeckModel {
     /// Ranks the current card's members. Runs lazily, only for cards
     /// near the deck position, on the already-analysed record fields —
     /// battery is the budget, not milliseconds.
+    ///
+    /// Then applies the keep-one default to similar-photo sets the user
+    /// hasn't touched: the keeper ✓, every other member marked.
     func rankCurrentCard() async {
-        guard var card = currentCard, card.suggestion == nil else { return }
-        let members = members(of: card)
-        guard members.count > 1 else { return }
+        guard let current = currentCard else { return }
+        var card = current
+        if card.suggestion == nil, card.group.memberKeys.count > 1 {
+            let scores = await ranker.rank(members(of: card), kind: card.group.kind)
+            // The deck may have moved on while ranking; write to this
+            // set, wherever it now is — never to whatever is current.
+            guard let live = self.card(withID: current.id) else { return }
+            card = live
+            card.suggestion = Self.best(of: scores, order: card.group.memberKeys)
+        }
+        proposeKeepOne(&card)
+        replaceCard(card)
+    }
 
-        let scores = await ranker.rank(members, kind: card.group.kind)
-        guard let best = scores.max(by: { $0.total < $1.total }) else { return }
-        card.suggestion = best
-        replaceCurrentCard(card)
+    /// The highest score; ties go to the earlier member, so every view
+    /// agrees on the same best.
+    static func best(of scores: [ShotScore], order: [String]) -> ShotScore? {
+        let position = Dictionary(order.enumerated().map { ($1, $0) }, uniquingKeysWith: { first, _ in first })
+        return scores.max { a, b in
+            if a.total != b.total { return a.total < b.total }
+            return (position[a.key] ?? .max) > (position[b.key] ?? .max)
+        }
+    }
+
+    /// Similar-photo sets (bursts, near duplicates) default to "keep
+    /// the best, mark the rest" until the user edits them. Favourites
+    /// and photos PhotoKit can't delete are never pre-marked; earlier
+    /// rejects stay marked.
+    private func proposeKeepOne(_ card: inout CardModel) {
+        guard
+            card.group.kind.proposesKeepOne,
+            !card.userEdited,
+            card.group.memberKeys.count > 1,
+            let keeper = keeperKey(for: card)
+        else { return }
+        card.markedKeys = Set(
+            card.group.memberKeys.filter { key in
+                if decisions[key] == .reject { return true }
+                return key != keeper
+                    && decisions[key] != .pick
+                    && records[key]?.isProposable == true
+            }
+        )
+    }
+
+    private func replaceCard(_ card: CardModel) {
+        if let index = cards.firstIndex(where: { $0.id == card.id }) {
+            cards[index] = card
+        } else if let index = laterQueue.firstIndex(where: { $0.id == card.id }) {
+            laterQueue[index] = card
+        }
     }
 
     // MARK: - Internals
@@ -425,6 +602,9 @@ final class DeckModel {
     private enum SwipeDirection {
         case keep
         case discard
+        /// The set page's "Next set": exactly the marks the user sees,
+        /// whatever the kind or member count.
+        case resolve
     }
 
     private func applySwipe(_ direction: SwipeDirection) {
@@ -437,7 +617,11 @@ final class DeckModel {
         // A single-member card with no marks is the user's own call on
         // one photo — swipe left discards it.
         var membersToReject: Set<String> = []
-        if direction == .discard && !card.group.kind.defaultsToKeepAll {
+        if direction == .resolve {
+            membersToReject = card.markedKeys.filter {
+                decisions[$0] != .pick && records[$0]?.sourceType.isDeletable == true
+            }
+        } else if direction == .discard && !card.group.kind.defaultsToKeepAll {
             if card.markedKeys.isEmpty && card.group.memberKeys.count == 1 {
                 let key = card.group.memberKeys[0]
                 if records[key]?.sourceType.isDeletable == true {
@@ -468,8 +652,9 @@ final class DeckModel {
         // Keeping clears any lingering reject marks from this group's
         // members (e.g. an earlier reduce-to-one that was undone
         // differently).
-        if direction == .keep || membersToReject.isEmpty {
-            for key in card.group.memberKeys where decisions[key] == .reject {
+        if direction == .keep || direction == .resolve || membersToReject.isEmpty {
+            for key in card.group.memberKeys
+            where decisions[key] == .reject && !membersToReject.contains(key) {
                 decisions[key] = nil
                 applied[key] = .unreviewed
             }
@@ -538,7 +723,10 @@ final class DeckModel {
         _ group: PhotoGroup,
         decisions: [String: PhotoDecision]
     ) -> Set<String> {
+        // Plus anything already marked for deletion (an earlier session,
+        // the review grids), so the set shows every ✕ that is real.
         Set(group.flaggedKeys.filter { decisions[$0] != .pick })
+            .union(group.memberKeys.filter { decisions[$0] == .reject })
     }
 
     /// Undo prefers the snapshot's marks and state but keeps the latest
@@ -624,5 +812,19 @@ final class DeckModel {
     private func undoHaptic() {
         guard hapticsEnabled else { return }
         UINotificationFeedbackGenerator().notificationOccurred(.warning)
+    }
+}
+
+extension PhotoGroupKind {
+    /// Kinds whose natural decision is "keep the best one": the set page
+    /// pre-marks every other member. Exact duplicates and original +
+    /// edit already propose their extras from the engine.
+    var proposesKeepOne: Bool {
+        self == .burst || self == .nearDuplicate
+    }
+
+    /// Kinds with a meaningful "best shot" card on the set page.
+    var hasBestShot: Bool {
+        proposesKeepOne || self == .exactDuplicate || self == .versions
     }
 }

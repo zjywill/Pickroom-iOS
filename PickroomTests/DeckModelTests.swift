@@ -391,4 +391,158 @@ final class DeckModelTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(deck.undoStack.count, DeckModel.undoDepth - 1,
                                     "the plan requires a depth of at least 20")
     }
+
+    // MARK: - Batch decisions (browsers)
+
+    func testBatchMarkSkipsUndeletableAndShowsOnTheCard() async {
+        var records = makeRecords()
+        records.append(AssetRecord(key: "photos:shared", capturedAt: nil, sourceType: .cloudShared))
+        let deck = DeckModel(
+            groups: [burstGroup(flagged: [])],
+            records: records,
+            persistence: persistence
+        )
+        let snapshot = deck.markForDeletion(keys: ["photos:b", "photos:shared"])
+        await deck.settleWrites()
+
+        XCTAssertEqual(deck.pendingRejects, ["photos:b"])
+        XCTAssertEqual(snapshot, ["photos:b": .unreviewed])
+        XCTAssertEqual(deck.currentCard?.markedKeys, ["photos:b"],
+                       "the deck shows the same mark the grid does")
+        let stored = await persistence.loadDecisions()
+        XCTAssertEqual(stored["photos:b"], .reject)
+    }
+
+    func testBatchKeepWithdrawsRejectsAndUndoRestoresThem() async {
+        let deck = DeckModel(
+            groups: [burstGroup(flagged: ["photos:b", "photos:c"])],
+            records: makeRecords(),
+            persistence: persistence
+        )
+        deck.discard()
+        XCTAssertEqual(deck.pendingRejects, ["photos:b", "photos:c"])
+
+        let snapshot = deck.keep(keys: ["photos:b", "photos:c", "photos:a"])
+        XCTAssertTrue(deck.pendingRejects.isEmpty)
+        XCTAssertEqual(snapshot.count, 2, "only the marked items change")
+
+        deck.restore(snapshot)
+        await deck.settleWrites()
+        XCTAssertEqual(deck.pendingRejects, ["photos:b", "photos:c"])
+        let stored = await persistence.loadDecisions()
+        XCTAssertEqual(stored["photos:b"], .reject)
+    }
+
+    func testBatchMarkReplacesAPickAndRemovePicksClearsOnlyPicks() {
+        let deck = DeckModel(
+            groups: [burstGroup(flagged: [])],
+            records: makeRecords(),
+            persistence: persistence
+        )
+        deck.makeKeeper(memberKey: "photos:a")
+        XCTAssertEqual(deck.decisions["photos:a"], .pick)
+
+        deck.removePicks(keys: ["photos:a", "photos:b"])
+        XCTAssertNil(deck.decisions["photos:a"])
+
+        deck.makeKeeper(memberKey: "photos:a")
+        deck.markForDeletion(keys: ["photos:a"])
+        XCTAssertEqual(deck.decisions["photos:a"], .reject, "the latest explicit gesture wins")
+    }
+
+    // MARK: - Set detail: best shot
+
+    func testKeepOnlyPicksTheBestAndMarksTheRestSparingFavourites() {
+        var records = makeRecords()
+        records[2] = AssetRecord(key: "photos:c", capturedAt: records[2].capturedAt, isFavorite: true)
+        let members = ["photos:a", "photos:b", "photos:c"]
+        let deck = DeckModel(groups: [burstGroup(flagged: [])], records: records, persistence: persistence)
+
+        deck.setKeeper("photos:b", among: members)
+        XCTAssertEqual(deck.decisions["photos:b"], .pick)
+
+        let snapshot = deck.keepOnly("photos:a", among: members)
+        XCTAssertEqual(deck.decisions["photos:a"], .pick)
+        XCTAssertEqual(deck.decisions["photos:b"], .reject, "the old pick is tossed with the rest")
+        XCTAssertNil(deck.decisions["photos:c"], "a favourite is never tossed by the bulk button")
+        XCTAssertEqual(deck.currentCard?.markedKeys, ["photos:b"])
+
+        deck.restore(snapshot)
+        XCTAssertEqual(deck.decisions["photos:b"], .pick)
+        XCTAssertNil(deck.decisions["photos:a"])
+    }
+
+    // MARK: - Set page: Next set
+
+    func testNextSetRejectsExactlyTheMarksOnScreen() async {
+        let deck = DeckModel(groups: [burstGroup(flagged: ["photos:b"])], records: makeRecords(), persistence: persistence)
+        deck.toggleMark(memberKey: "photos:c")
+        deck.toggleMark(memberKey: "photos:b")   // the user keeps the pre-marked one
+        deck.resolveCurrent()
+        await deck.settleWrites()
+
+        XCTAssertEqual(deck.pendingRejects, ["photos:c"])
+        XCTAssertTrue(deck.isFinished)
+        deck.undo()
+        XCTAssertTrue(deck.pendingRejects.isEmpty, "Back brings the set back undecided")
+        XCTAssertNotNil(deck.currentCard)
+    }
+
+    func testNextSetWithNoMarksKeepsASinglePhoto() {
+        let group = PhotoGroup(
+            id: "single", kind: .failedFrame, memberKeys: ["photos:a"], representativeKey: "photos:a",
+            certainty: 1, flaggedKeys: [], suggestedKeeperKey: nil, headline: "1"
+        )
+        let deck = DeckModel(groups: [group], records: makeRecords(), persistence: persistence)
+        deck.resolveCurrent()
+        XCTAssertTrue(deck.pendingRejects.isEmpty, "unlike a left swipe, Next never tosses an unmarked photo")
+    }
+
+    func testEarlierRejectsShowAsMarksOnTheSet() {
+        let deck = DeckModel(
+            groups: [burstGroup(flagged: [])],
+            records: makeRecords(),
+            decisions: ["photos:c": .reject],
+            persistence: persistence
+        )
+        XCTAssertEqual(deck.currentCard?.markedKeys, ["photos:c"])
+        deck.setMarks([])
+        deck.resolveCurrent()
+        XCTAssertTrue(deck.pendingRejects.isEmpty, "unmarking on the page withdraws the earlier reject")
+    }
+
+    // MARK: - Keep-one default
+
+    func testSimilarSetDefaultsToKeepTheBestAndMarkTheRest() async {
+        var records = makeRecords()
+        records.append(AssetRecord(key: "photos:fav", capturedAt: nil, isFavorite: true))
+        let keys = ["photos:a", "photos:b", "photos:c", "photos:fav"]
+        let group = PhotoGroup(
+            id: "burst", kind: .burst, memberKeys: keys, representativeKey: "photos:a",
+            certainty: 0.8, flaggedKeys: [], suggestedKeeperKey: "photos:b", headline: "4 shots"
+        )
+        let deck = DeckModel(groups: [group], records: records, persistence: persistence)
+        await deck.rankCurrentCard()
+        XCTAssertEqual(deck.currentCard?.markedKeys, ["photos:a", "photos:c"],
+                       "the keeper and the favourite stay; the rest are marked")
+
+        // Choosing another best before editing: the proposal follows it.
+        deck.makeKeeper(memberKey: "photos:c")
+        XCTAssertEqual(deck.currentCard?.markedKeys, ["photos:a", "photos:b"])
+
+        // Once edited, the default never comes back.
+        deck.toggleMark(memberKey: "photos:a")
+        await deck.rankCurrentCard()
+        XCTAssertEqual(deck.currentCard?.markedKeys, ["photos:b"])
+    }
+
+    func testScreenshotBucketsGetNoKeepOneDefault() async {
+        let group = PhotoGroup(
+            id: "shots", kind: .expiredUtility, memberKeys: ["photos:a", "photos:b"], representativeKey: "photos:a",
+            certainty: 0.5, flaggedKeys: [], suggestedKeeperKey: nil, headline: "2 screenshots"
+        )
+        let deck = DeckModel(groups: [group], records: makeRecords(), persistence: persistence)
+        await deck.rankCurrentCard()
+        XCTAssertEqual(deck.currentCard?.markedKeys, [])
+    }
 }

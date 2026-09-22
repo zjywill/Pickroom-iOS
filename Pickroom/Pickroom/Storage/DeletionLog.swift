@@ -262,6 +262,25 @@ actor PersistenceStore {
         try? Self.writeDictionary(groupStates, to: url)
     }
 
+    // MARK: - Start over
+
+    /// Triage's "Start over": every mark and pick is cleared, decided
+    /// sets come back, and the session starts from the first set.
+    /// Ignored sets stay ignored unless `includingIgnored`. Nothing
+    /// here touches the photo library.
+    func startOver(includingIgnored: Bool) {
+        decisions = [:]
+        try? Self.writeDictionary(decisions, to: directory.appendingPathComponent("decisions.bin"))
+        try? FileManager.default.removeItem(at: directory.appendingPathComponent("decisions.journal"))
+        journalEntryCount = 0
+
+        groupStates = groupStates.filter { !includingIgnored && $0.value == .dismissed }
+        persistGroupStates()
+
+        session = nil
+        try? FileManager.default.removeItem(at: directory.appendingPathComponent("session.bin"))
+    }
+
     // MARK: - Session
 
     func loadSession() -> StoredSession? { session }
