@@ -8,7 +8,7 @@ settings:
   base:
     SWIFT_VERSION: "6.0"
     CODE_SIGN_STYLE: Automatic
-    TARGETED_DEVICE_FAMILY: "1,2"
+    TARGETED_DEVICE_FAMILY: "1"
 packages:
   PickroomCore:
     path: Packages/PickroomCore
@@ -23,16 +23,17 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.pinapia.pickroom
+        # iPhone only for now: iPad landscape layouts are untested.
+        TARGETED_DEVICE_FAMILY: "1"
         PRODUCT_NAME: Pickroom
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_CFBundleDisplayName: Pickroom
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
-        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight
         INFOPLIST_KEY_NSPhotoLibraryUsageDescription: "Pickroom analyses your photo library on this device to surface photos with no reason to exist — blurred frames, bursts, expired screenshots, exact duplicates. Deletion needs your confirmation and moves photos to Recently Deleted. Photos never leave the device — analysis works offline and never downloads originals from the network."
         MARKETING_VERSION: "1.0"
-        CURRENT_PROJECT_VERSION: "2"
+        CURRENT_PROJECT_VERSION: "3"
         SWIFT_STRICT_CONCURRENCY: complete
         ENABLE_USER_SCRIPT_SANDBOXING: YES
         DEVELOPMENT_TEAM: "NGM7GX8DGB"
