@@ -46,8 +46,10 @@ public enum PhotoGroupKind: String, Codable, CaseIterable, Sendable {
 
     /// Groups that must never produce a deletion proposal, whatever the
     /// fingerprint says. Getting this wrong causes real data loss.
+    /// `versions` is not among them: keeping the edit and letting the
+    /// separate original go is the user's stated preference.
     public var defaultsToKeepAll: Bool {
-        self == .bracket || self == .versions || self == .session || self == .video
+        self == .bracket || self == .session || self == .video
     }
 }
 

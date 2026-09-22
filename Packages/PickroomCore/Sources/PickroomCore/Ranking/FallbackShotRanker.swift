@@ -26,9 +26,19 @@ public struct FallbackShotRanker: ShotRanker {
         guard members.count > 1 else {
             return members.map { ShotScore(key: $0.key, total: 1, confidence: confidence(for: $0)) }
         }
-        // Single-member groups, brackets and versions are not ranked;
-        // an existing user pick wins outright.
-        if kind == .bracket || kind == .versions {
+        // Original + edit: the edit is the one to keep.
+        if kind == .versions {
+            return members.map {
+                ShotScore(
+                    key: $0.key,
+                    total: $0.isEditedVersion ? 1 : 0,
+                    reasons: [$0.isEditedVersion ? "Edited version" : "Unedited original"],
+                    confidence: confidence(for: $0)
+                )
+            }
+        }
+        // Brackets are not ranked; an existing user pick wins outright.
+        if kind == .bracket {
             return members.map {
                 ShotScore(
                     key: $0.key,

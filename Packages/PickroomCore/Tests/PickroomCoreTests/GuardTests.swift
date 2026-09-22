@@ -65,7 +65,9 @@ final class BracketGuardTests: XCTestCase {
         XCTAssertTrue(groups.filter { $0.kind == .bracket }.isEmpty)
     }
 
-    func testNormalBurstStillProposesOnlyBadFrames() throws {
+    /// Blur never pre-marks: a focus measure on a small render reads
+    /// sky, water and night as soft. The headline still says so.
+    func testBurstDescribesSoftFramesWithoutProposingThem() throws {
         let detector = FailedFrameDetector()
         let bad = detector.assess(Fixtures.softPlane())
         let assets = [
@@ -75,16 +77,16 @@ final class BracketGuardTests: XCTestCase {
         ]
         let (groups, _) = GroupEngine().makeGroups(assets: assets)
         let burst = try XCTUnwrap(groups.first { $0.kind == .burst })
-        XCTAssertEqual(burst.flaggedKeys, ["soft1", "soft2"])
+        XCTAssertTrue(burst.flaggedKeys.isEmpty, "blur is never a proposal")
         XCTAssertEqual(burst.suggestedKeeperKey, "keep", "burstSelectionTypes short circuit: the user pick wins")
         XCTAssertEqual(burst.representativeKey, "keep")
-        XCTAssertTrue(burst.headline.contains("2 blurred"), "headline describes the situation: \(burst.headline)")
+        XCTAssertTrue(burst.headline.contains("2 may be soft"), "headline describes the situation: \(burst.headline)")
     }
 
     /// Inside a burst, exposure-based badness is the signature of HDR
     /// source frames (PhotoKit exposes no exposure bias, so an iPhone
     /// AEB burst looks like one good frame plus clipped extremes).
-    /// Focus failures still flag.
+    /// Neither kind of badness pre-marks a burst member.
     func testBurstNeverFlagsExposureBasedBadness() throws {
         let exposureBad = QualityAssessment(
             tier: .obviouslyBroken,
@@ -110,14 +112,14 @@ final class BracketGuardTests: XCTestCase {
         ]
         let (groups, _) = GroupEngine().makeGroups(assets: assets)
         let burst = try XCTUnwrap(groups.first { $0.kind == .burst })
-        XCTAssertEqual(burst.flaggedKeys, ["genuine-blur"], "exposure evidence inside a burst is the HDR-source signature, not a failed frame")
+        XCTAssertTrue(burst.flaggedKeys.isEmpty, "exposure evidence is the HDR-source signature; blur is never a proposal")
     }
 }
 
-/// Versions guard: an original and its edit never form a deletion
-/// prompt.
+/// Original + edit as separate photos: the edit is kept, the original
+/// pre-marked.
 final class VersionsGuardTests: XCTestCase {
-    func testOriginalAndEditNeverProposeDeletion() throws {
+    func testKeepsTheEditAndProposesTheOriginal() throws {
         let identical = Fixtures.print([0.3, 0.3])
         let assets = [
             Fixtures.asset("original", capturedAt: Fixtures.base, fingerprint: identical),
@@ -126,8 +128,21 @@ final class VersionsGuardTests: XCTestCase {
         let (groups, _) = GroupEngine().makeGroups(assets: assets)
         let versions = try XCTUnwrap(groups.first { $0.kind == .versions })
         XCTAssertEqual(Set(versions.memberKeys), ["original", "edited"])
-        XCTAssertTrue(versions.flaggedKeys.isEmpty, "an edit and its original never receive a deletion prompt")
-        XCTAssertTrue(versions.kind.defaultsToKeepAll)
+        XCTAssertEqual(versions.flaggedKeys, ["original"])
+        XCTAssertEqual(versions.suggestedKeeperKey, "edited")
+        XCTAssertEqual(versions.representativeKey, "edited", "the card shows the edit")
+        XCTAssertFalse(versions.kind.defaultsToKeepAll)
+    }
+
+    func testFavouriteOriginalIsNeverPreMarked() throws {
+        let identical = Fixtures.print([0.3, 0.3])
+        let assets = [
+            Fixtures.asset("original", capturedAt: Fixtures.base, isFavorite: true, fingerprint: identical),
+            Fixtures.asset("edited", capturedAt: Fixtures.base.addingTimeInterval(10), isEditedVersion: true, fingerprint: identical),
+        ]
+        let (groups, _) = GroupEngine().makeGroups(assets: assets)
+        let versions = try XCTUnwrap(groups.first { $0.kind == .versions })
+        XCTAssertTrue(versions.flaggedKeys.isEmpty)
     }
 }
 
