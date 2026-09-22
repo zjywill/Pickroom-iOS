@@ -162,3 +162,49 @@ final class AppLayerTests: XCTestCase {
         }
     }
 }
+
+/// The Stage A′ cache: a relaunch or rescan reuses saved results for
+/// unchanged photos, re-analyses edited ones, and forgets deleted ones.
+final class QualityCacheTests: XCTestCase {
+    private func analysed(_ key: String, modified: Date) -> AssetRecord {
+        var record = AssetRecord(key: key, capturedAt: nil, modificationDate: modified)
+        record.quality = QualityAssessment(
+            tier: .ok,
+            metrics: QualityMetrics(
+                subjectSharpness: 50, globalSharpness: 50, clippedHighlights: 0,
+                clippedShadows: 0, frameUniformity: 0.3, subjectIsFace: false
+            ),
+            reasons: []
+        )
+        record.contentHash = Data([1, 2, 3])
+        return record
+    }
+
+    func testRoundTripAppliesOnlyToUnchangedPhotos() throws {
+        let date = Date(timeIntervalSince1970: 1_700_000_000)
+        var cache = QualityCache()
+        cache.store(analysed("photos:a", modified: date))
+
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("quality-\(UUID()).plist")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try cache.save(to: url)
+        let loaded = QualityCache.load(from: url)
+
+        let same = loaded.apply(to: AssetRecord(key: "photos:a", capturedAt: nil, modificationDate: date))
+        XCTAssertNotNil(same.quality)
+        XCTAssertEqual(same.contentHash, Data([1, 2, 3]))
+
+        let edited = loaded.apply(to: AssetRecord(key: "photos:a", capturedAt: nil, modificationDate: date.addingTimeInterval(60)))
+        XCTAssertNil(edited.quality, "an edited photo is analysed again")
+    }
+
+    func testPruneForgetsDeletedPhotos() {
+        let date = Date(timeIntervalSince1970: 1_700_000_000)
+        var cache = QualityCache()
+        cache.store(analysed("photos:a", modified: date))
+        cache.store(analysed("photos:b", modified: date))
+        XCTAssertTrue(cache.prune(retaining: ["photos:a"]))
+        XCTAssertEqual(cache.count, 1)
+        XCTAssertFalse(cache.prune(retaining: ["photos:a"]))
+    }
+}
