@@ -1,6 +1,6 @@
 name: Pickroom
 options:
-  bundleIdPrefix: com.junyizhang
+  bundleIdPrefix: com.pinapia
   deploymentTarget:
     iOS: "18.0"
   createIntermediateGroups: true
@@ -22,21 +22,20 @@ targets:
       - package: PickroomCore
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.junyizhang.PickroomiOS
+        PRODUCT_BUNDLE_IDENTIFIER: com.pinapia.pickroom
         PRODUCT_NAME: Pickroom
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_CFBundleDisplayName: Pickroom
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
-        INFOPLIST_KEY_UISupportedInterfaceOrientations~ipad: UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight
         INFOPLIST_KEY_NSPhotoLibraryUsageDescription: "Pickroom analyses your photo library on this device to surface photos with no reason to exist — blurred frames, bursts, expired screenshots, exact duplicates. Deletion needs your confirmation and moves photos to Recently Deleted. Photos never leave the device — analysis works offline and never downloads originals from the network."
         MARKETING_VERSION: "0.1.0"
         CURRENT_PROJECT_VERSION: "1"
         SWIFT_STRICT_CONCURRENCY: complete
         ENABLE_USER_SCRIPT_SANDBOXING: YES
-        DEVELOPMENT_TEAM: ""
-        CODE_SIGN_IDENTITY: "-"
+        DEVELOPMENT_TEAM: "NGM7GX8DGB"
     info:
       path: Pickroom/Info.plist
       properties:
@@ -56,7 +55,7 @@ targets:
       - package: PickroomCore
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.junyizhang.PickroomiOSTests
+        PRODUCT_BUNDLE_IDENTIFIER: com.pinapia.pickroom.tests
         GENERATE_INFOPLIST_FILE: YES
         SWIFT_STRICT_CONCURRENCY: complete
 schemes:
