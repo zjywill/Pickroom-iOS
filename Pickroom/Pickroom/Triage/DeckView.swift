@@ -2,35 +2,33 @@ import SwiftUI
 import Photos
 import PickroomCore
 
-/// The deck: one card at a time, full screen, thumb-driven. The entire
-/// value is rhythm — no confirmation dialogs during triage; safety
-/// comes from undo and from nothing leaving the library until an
-/// explicit commit.
+/// Triage: one set at a time, laid out for a decision — best shot on
+/// top, the rest ranked below, tap to mark — then "Next set". No
+/// confirmation dialogs during triage; safety comes from Back (undo)
+/// and from nothing leaving the library until an explicit commit.
 struct DeckView: View {
     @Environment(AppModel.self) private var model
     let deck: DeckModel
 
-    @State private var dragOffset: CGSize = .zero
-    @State private var inspecting: InspectTarget?
-    @State private var showingGroupSheet = false
     @State private var showingCommit = false
-
-    struct InspectTarget: Identifiable {
-        let assetKey: String
-        var id: String { assetKey }
-    }
+    @State private var deletedBanner: AppModel.CommitReport?
+    @State private var confirmingIgnore = false
+    @State private var confirmingStartOver = false
 
     var body: some View {
         Group {
             if let card = deck.currentCard {
-                cardStack(card)
+                setStack(card)
             } else {
                 finishedView
             }
         }
-        .background { MeadowBackground() }
-        .campNavigationBar(background: .clear) {
-            CampBackButtonIfPushed()
+        .background(Camp.paper)
+        .campNavigationBar(background: Camp.paper) {
+            HStack(spacing: 8) {
+                CampBackButtonIfPushed()
+                startOverButton
+            }
         } center: {
             if deck.currentCard != nil {
                 progressPill
@@ -38,10 +36,43 @@ struct DeckView: View {
         } trailing: {
             commitButton
         }
+        .campDialog(
+            isPresented: $confirmingStartOver,
+            title: "Start over?",
+            message: "Every mark and pick is cleared and all sets come back, from the first one. Nothing in your library changes.",
+            actions: [
+                CampDialogAction(title: "Start over", role: .destructive) {
+                    Task { await model.startOver(includingIgnored: false) }
+                },
+                CampDialogAction(title: "Start over + ignored sets", role: .cancel) {
+                    Task { await model.startOver(includingIgnored: true) }
+                },
+                .cancel(),
+            ]
+        )
         .sheet(isPresented: $showingCommit) {
             CommitSheet()
                 .environment(model)
                 .campSheet()
+        }
+        .overlay(alignment: .top) {
+            if let report = deletedBanner {
+                DeletedBanner(report: report) {
+                    deletedBanner = nil
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 60)
+                .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .animation(.snappy, value: deletedBanner)
+        .onChange(of: model.lastCommitReport) { _, report in
+            deletedBanner = report
+        }
+        .task(id: deletedBanner) {
+            guard deletedBanner != nil else { return }
+            try? await Task.sleep(for: .seconds(6))
+            if !Task.isCancelled { deletedBanner = nil }
         }
         // Hardware keyboard (iPad): the same four decisions, same
         // rhythm, without the thumb. Phase 5 parity with the Mac app's
@@ -52,18 +83,13 @@ struct DeckView: View {
     @ViewBuilder
     private var hardwareKeyboardShortcuts: some View {
         Group {
-            Button("Keep") { deck.keep() }
+            Button("Next set") { deck.resolveCurrent() }
                 .keyboardShortcut(.rightArrow, modifiers: [])
-            Button("Discard") { deck.discard() }
-                .keyboardShortcut(.leftArrow, modifiers: [])
             Button("Later") { deck.decideLater() }
                 .keyboardShortcut(.upArrow, modifiers: [])
-            Button("Inspect") {
-                if let card = deck.currentCard {
-                    inspecting = InspectTarget(assetKey: card.group.representativeKey)
-                }
-            }
-            .keyboardShortcut(.space, modifiers: [])
+            Button("Back") { deck.undo() }
+                .keyboardShortcut(.leftArrow, modifiers: [])
+                .disabled(!deck.canUndo)
             Button("Undo") { deck.undo() }
                 .keyboardShortcut("z", modifiers: .command)
                 .disabled(!deck.canUndo)
@@ -73,46 +99,113 @@ struct DeckView: View {
         .accessibilityHidden(true)
     }
 
-    // MARK: - Card stack
+    // MARK: - Set page
 
     @ViewBuilder
-    private func cardStack(_ card: CardModel) -> some View {
+    private func setStack(_ card: CardModel) -> some View {
         VStack(spacing: 0) {
-            cardHeader(card)
-                .padding(.horizontal, 24)
-                .padding(.top, 8)
+            SetPage(group: card.group, mode: .deckCard, onDecided: { _ in deck.resolveCurrent() }) {
+                Button {
+                    confirmingIgnore = true
+                } label: {
+                    Label("Ignore this set for good", systemImage: "eye.slash")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.campPlain)
+            }
+            // A fresh page per set: its order and "Kept" labels start
+            // from this set's marks.
+            .id(card.id)
+            .transition(.asymmetric(
+                insertion: .move(edge: .trailing).combined(with: .opacity),
+                removal: .move(edge: .leading).combined(with: .opacity)
+            ))
 
-            CardView(
-                card: card,
-                deck: deck,
-                dragOffset: $dragOffset,
-                onSwipe: handleSwipe,
-                onTap: { inspecting = InspectTarget(assetKey: card.group.representativeKey) },
-                onLongPress: { showingGroupSheet = true }
-            )
-            .padding(.horizontal, 28)
-            .zIndex(1)
-
-            Spacer(minLength: 12)
-            swipeHints(card)
-            Spacer(minLength: 12)
-            footer
-                .padding(.horizontal, 16)
+            actionBar(card)
         }
-        .fullScreenCover(item: $inspecting) { target in
-            InspectView(assetKey: target.assetKey)
-                .environment(model)
-        }
-        .sheet(isPresented: $showingGroupSheet) {
-            GroupSheet(groupID: card.id, deck: deck)
-                .environment(model)
-                .campSheet()
-        }
+        .animation(.snappy, value: card.id)
+        .campDialog(
+            isPresented: $confirmingIgnore,
+            title: "Ignore this set for good?",
+            message: "It won't come back. Nothing is deleted — the photos stay in your library.",
+            actions: [
+                CampDialogAction(title: "Ignore set", role: .destructive) {
+                    deck.dismissCurrentCard()
+                },
+                .cancel(),
+            ]
+        )
         .task(id: card.id) {
             prefetchWindow()
+            // Suggestion + the keep-one default for this set.
             await deck.rankCurrentCard()
         }
         .shakeToUndo(deck: deck)
+    }
+
+    /// Back · Later · Next. "Next" names what it does with the marks on
+    /// screen, so the decision is never a surprise.
+    private func actionBar(_ card: CardModel) -> some View {
+        let marked = card.markedKeys.filter { model.deck?.decisions[$0] != .pick }.count
+        return HStack(spacing: 10) {
+            Button {
+                deck.undo()
+            } label: {
+                Image(systemName: "arrow.uturn.backward")
+            }
+            .buttonStyle(RoundChunkyButtonStyle(fill: Camp.wood, edge: Camp.woodEdge, size: 48))
+            .disabled(!deck.canUndo)
+            .accessibilityLabel("Back to the previous set")
+
+            Button {
+                deck.decideLater()
+            } label: {
+                Label("Later", systemImage: "clock.arrow.circlepath")
+                    .lineLimit(1)
+            }
+            .buttonStyle(ChunkyButtonStyle(
+                fill: Camp.later,
+                edge: Camp.laterEdge,
+                foreground: Camp.laterInk,
+                horizontalPadding: 14,
+                verticalPadding: 13
+            ))
+            .fixedSize()
+
+            Button {
+                deck.resolveCurrent()
+            } label: {
+                HStack(spacing: 6) {
+                    Text(marked > 0 ? "Toss \(marked) · Next" : "Keep all · Next")
+                    Image(systemName: "chevron.right")
+                }
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+                .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(marked > 0
+                ? ChunkyButtonStyle(fill: Camp.toss, edge: Camp.tossEdge, verticalPadding: 13)
+                : ChunkyButtonStyle(fill: Camp.keep, edge: Camp.keepEdge, verticalPadding: 13))
+            .accessibilityLabel(marked > 0 ? "Toss \(marked) and go to the next set" : "Keep all and go to the next set")
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 10)
+        .padding(.bottom, 8)
+        .background(
+            Camp.paper
+                .shadow(color: Camp.panelEdge.opacity(0.6), radius: 0, x: 0, y: -2)
+        )
+    }
+
+    /// Clears every decision and runs the deck again from the top.
+    private var startOverButton: some View {
+        Button {
+            confirmingStartOver = true
+        } label: {
+            Image(systemName: "arrow.counterclockwise")
+        }
+        .buttonStyle(RoundChunkyButtonStyle(fill: Camp.cream, edge: Camp.panelEdge, foreground: Camp.ink, size: 44))
+        .accessibilityLabel("Start over")
     }
 
     /// Progress in sets — never in gigabytes.
@@ -167,105 +260,6 @@ struct DeckView: View {
         .accessibilityLabel("Commit, \(model.commitCandidates.count) marked")
     }
 
-    /// The situation headline — kind, what the app is sure of, and the
-    /// suggestion's reasons — with the raccoon peeking over the card.
-    private func cardHeader(_ card: CardModel) -> some View {
-        HStack(alignment: .bottom, spacing: 8) {
-            VStack(alignment: .leading, spacing: 7) {
-                CampTag(text: card.group.kind.title)
-                Text(card.group.headline)
-                    .font(Camp.display(.title2, weight: .semibold))
-                    .foregroundStyle(Camp.forestInk)
-                    .fixedSize(horizontal: false, vertical: true)
-                if let suggestion = card.suggestion, !suggestion.reasons.isEmpty {
-                    Text("Suggested: \(suggestion.reasons.joined(separator: " · "))")
-                        .font(.footnote.weight(.bold))
-                        .foregroundStyle(Camp.mossInk)
-                }
-                if card.group.kind == .failedFrame && card.group.flaggedKeys.isEmpty {
-                    Text("Your call — nothing is proposed automatically")
-                        .font(.footnote.weight(.bold))
-                        .foregroundStyle(Camp.mossInk)
-                }
-                if UIDevice.current.userInterfaceIdiom == .pad {
-                    Text("Keyboard: → keep · ← discard · ↑ later · Space inspect · ⌘Z undo")
-                        .font(.caption2)
-                        .foregroundStyle(Camp.mossInk)
-                }
-            }
-            .padding(.bottom, 14)
-            Spacer(minLength: 0)
-            Raccoon(mood: dragOffset.width < -24 ? .oops : .watching)
-                .frame(width: 80)
-                .offset(x: -18, y: 16)
-                .animation(.snappy, value: dragOffset.width < -24)
-        }
-    }
-
-    /// Standing reminder of the three directions, in decision colours.
-    private func swipeHints(_ card: CardModel) -> some View {
-        HStack {
-            hint("Toss", systemImage: "arrow.left", color: Camp.toss)
-            Spacer()
-            hint("Later", systemImage: "arrow.up", color: Camp.laterInk)
-            Spacer()
-            hint(card.group.kind.defaultsToKeepAll || card.group.memberKeys.count == 1 ? "Keep" : "Keep all", systemImage: "arrow.right", color: Camp.keep)
-        }
-        .padding(.horizontal, 16)
-        .accessibilityHidden(true)
-    }
-
-    private func hint(_ title: String, systemImage: String, color: Color) -> some View {
-        Label(title, systemImage: systemImage)
-            .font(Camp.display(.subheadline, weight: .semibold))
-            .foregroundStyle(color)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 7)
-            .background(Capsule().fill(Camp.cream.opacity(0.75)))
-    }
-
-    private var footer: some View {
-        HStack {
-            // Persistent, thumb-reachable undo.
-            Button {
-                deck.undo()
-            } label: {
-                Label("Undo", systemImage: "arrow.uturn.backward")
-            }
-            .buttonStyle(ChunkyButtonStyle(fill: Camp.wood, edge: Camp.woodEdge, horizontalPadding: 16, verticalPadding: 11))
-            .disabled(!deck.canUndo)
-            .accessibilityLabel("Undo last decision")
-
-            Spacer()
-
-            if let card = deck.currentCard, !card.markedKeys.isEmpty {
-                Text("\(card.markedKeys.count) marked")
-                    .font(.subheadline.weight(.heavy))
-                    .foregroundStyle(Camp.toss)
-                    .monospacedDigit()
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 7)
-                    .background(Capsule().fill(Camp.cream.opacity(0.85)))
-            }
-
-            Spacer()
-
-            Button {
-                deck.decideLater()
-            } label: {
-                Label("Later", systemImage: "clock.arrow.circlepath")
-            }
-            .buttonStyle(ChunkyButtonStyle(
-                fill: Camp.later,
-                edge: Camp.laterEdge,
-                foreground: Camp.laterInk,
-                horizontalPadding: 16,
-                verticalPadding: 11
-            ))
-        }
-        .padding(.bottom, 12)
-    }
-
     /// Dusk at camp: everything reviewed. No score, no streak — just
     /// what is marked and the way to act on it.
     private var finishedView: some View {
@@ -307,6 +301,14 @@ struct DeckView: View {
                     Text("Nothing is marked for deletion. Good work.")
                         .foregroundStyle(Camp.muted)
                 }
+                Button {
+                    confirmingStartOver = true
+                } label: {
+                    Label("Start over", systemImage: "arrow.counterclockwise")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.campPlain)
+                .padding(.top, 4)
             }
             .multilineTextAlignment(.center)
             .padding(.horizontal, 22)
@@ -322,17 +324,6 @@ struct DeckView: View {
         // The scene is drawn to width; below it, the camp ground
         // continues rather than the deck's meadow.
         .background(Color(hex: 0x6E8B4E).ignoresSafeArea())
-    }
-
-    // MARK: - Gestures
-
-    private func handleSwipe(_ swipe: DeckViewSwipe) {
-        switch swipe {
-        case .keep: deck.keep()
-        case .discard: deck.discard()
-        case .later: deck.decideLater()
-        }
-        dragOffset = .zero
     }
 
     /// Sliding prefetch window around the deck position — the current
@@ -353,5 +344,45 @@ extension View {
     @ViewBuilder
     func shakeToUndo(deck: DeckModel) -> some View {
         modifier(ShakeToUndoModifier(deck: deck))
+    }
+}
+
+/// After a commit: what happened and where the photos went, in one
+/// banner that leaves by itself.
+private struct DeletedBanner: View {
+    let report: AppModel.CommitReport
+    let onClose: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            IconBadge(systemImage: "checkmark", fill: Camp.keep, size: 34)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("^[\(report.deletedCount) photo](inflect: true) deleted")
+                    .font(Camp.display(.headline, weight: .semibold))
+                    .foregroundStyle(Camp.ink)
+                Text("In Recently Deleted for 30 days. Space comes back once it's emptied — in Photos.")
+                    .font(.footnote)
+                    .foregroundStyle(Camp.muted)
+                Link(destination: URL(string: "photos-redirect://")!) {
+                    Label("Open Photos", systemImage: "arrow.up.right")
+                }
+                .buttonStyle(ChunkyButtonStyle(
+                    fill: Camp.wood,
+                    edge: Camp.woodEdge,
+                    cornerRadius: 12,
+                    font: .caption.weight(.heavy),
+                    horizontalPadding: 12,
+                    verticalPadding: 6
+                ))
+                .padding(.top, 4)
+            }
+            Spacer(minLength: 0)
+            Button(action: onClose) {
+                Image(systemName: "xmark")
+            }
+            .buttonStyle(RoundChunkyButtonStyle(fill: Camp.sand, edge: Camp.panelEdge, foreground: Camp.muted, size: 30))
+            .accessibilityLabel("Dismiss")
+        }
+        .campPanel(padding: 14)
     }
 }

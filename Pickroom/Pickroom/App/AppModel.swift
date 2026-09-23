@@ -37,6 +37,13 @@ final class AppModel {
     private(set) var diagnosis = StorageSituation.undetermined
     private(set) var recentlyDeletedPending = 0
     private(set) var lastSessionSummary: String?
+    /// On-disk size of each video, for "biggest first". Filled in the
+    /// background after each library load.
+    private(set) var fileSizes: [String: Int64] = [:]
+    private(set) var videoSizesReady = false
+    /// When the library was last read from PhotoKit, shown on Home.
+    private(set) var lastScanDate: Date? = UserDefaults.standard.object(forKey: "lastScanDate") as? Date
+    private(set) var isRescanning = false
 
     // Commit
     private(set) var lastCommitReport: CommitReport?
@@ -147,7 +154,8 @@ final class AppModel {
         async let pendingTask = deletionLog.pending()
         async let storedSessionTask = persistence.loadSession()
 
-        records = await recordsTask
+        records = await analysis.applyCachedQuality(to: await recordsTask)
+        markScanned()
         let (pendingCount, _) = await pendingTask
         recentlyDeletedPending = pendingCount
         let storedSession = await storedSessionTask
@@ -156,6 +164,7 @@ final class AppModel {
         let decisions = await persistence.loadDecisions()
         await rebuildDeck(decisions: decisions)
         diagnosis = await diagnosisTask
+        await loadVideoSizes()
 
         restartAnalysis()
     }
@@ -207,7 +216,10 @@ final class AppModel {
     func runAnalysis() async {
         guard !records.isEmpty else { return }
 
-        let analysed = await analysis.analyseQuality(records: records)
+        let analysed = await analysis.analyseQuality(records: records) { [weak self] partial in
+            // Big libraries: let the deck improve while the pass runs.
+            await self?.mergeAnalysis(partial)
+        }
         guard !Task.isCancelled else { return }
         await mergeAnalysis(analysed)
 
@@ -279,11 +291,70 @@ final class AppModel {
         let fresh = await library.loadAssetRecords()
         // Keep analysis results that are still valid (same
         // modification date); new or edited assets get analysed.
-        records = Self.merge(analysis: records, into: fresh)
+        records = await analysis.applyCachedQuality(to: Self.merge(analysis: records, into: fresh))
+        markScanned()
         await rebuildDeck(decisions: currentDecisions)
+        await loadVideoSizes()
         if records.contains(where: { $0.mediaType == .image && $0.quality == nil }) {
             restartAnalysis()
         }
+    }
+
+    // MARK: - Sizes
+
+    /// Reads the size of every video not yet measured. Videos are where
+    /// the space is; photos are not worth a resource lookup each.
+    private func loadVideoSizes() async {
+        let missing = records
+            .filter { $0.mediaType == .video && fileSizes[$0.key] == nil }
+            .map { String($0.key.dropFirst("photos:".count)) }
+        if !missing.isEmpty {
+            let measured = await Task.detached(priority: .utility) {
+                Self.fileSizes(identifiers: missing)
+            }.value
+            for (identifier, size) in measured {
+                fileSizes["photos:\(identifier)"] = size
+            }
+        }
+        videoSizesReady = true
+    }
+
+    /// Sum of the original resources' sizes. PhotoKit has no public size
+    /// API; `fileSize` on `PHAssetResource` is the long-standing way.
+    nonisolated private static func fileSizes(identifiers: [String]) -> [String: Int64] {
+        var sizes: [String: Int64] = [:]
+        let assets = PHAsset.fetchAssets(withLocalIdentifiers: identifiers, options: nil)
+        assets.enumerateObjects { asset, _, _ in
+            let total = PHAssetResource.assetResources(for: asset)
+                .filter { $0.type == .video || $0.type == .fullSizeVideo || $0.type == .pairedVideo }
+                .compactMap { ($0.value(forKey: "fileSize") as? NSNumber)?.int64Value }
+                .reduce(0, +)
+            if total > 0 { sizes[asset.localIdentifier] = total }
+        }
+        return sizes
+    }
+
+    /// Known size of the given items; unmeasured ones count as zero.
+    func totalSize(of keys: some Sequence<String>) -> Int64 {
+        keys.reduce(0) { $0 + (fileSizes[$1] ?? 0) }
+    }
+
+    /// Home's Rescan: re-reads the library and analyses whatever is new
+    /// or edited since last time. Saved results are reused, so this is
+    /// cheap even on a huge library.
+    func rescan() async {
+        guard canTriage, !isRescanning else { return }
+        isRescanning = true
+        defer { isRescanning = false }
+        await rescanLibrary()
+        await refreshPendingFigure()
+        if !analysis.isAnalysing { restartAnalysis() }
+    }
+
+    private func markScanned() {
+        let now = Date()
+        lastScanDate = now
+        UserDefaults.standard.set(now, forKey: "lastScanDate")
     }
 
     // MARK: - Groups
@@ -291,7 +362,24 @@ final class AppModel {
     /// Permanently ignores a group from outside the deck (the review
     /// list). The deck drops it on the rebuild; nothing else restarts.
     func dismissGroup(id: String) async {
-        await persistence.saveGroupState(id: id, state: .dismissed)
+        await setGroupState(id: id, .dismissed)
+    }
+
+    /// Triage's "Start over": clears every mark and pick, brings decided
+    /// sets back (and ignored ones, if asked), and starts a fresh deck
+    /// from the first set. Nothing is deleted or restored in Photos.
+    func startOver(includingIgnored: Bool) async {
+        await deck?.settleWrites()
+        await persistence.startOver(includingIgnored: includingIgnored)
+        lastSessionSummary = nil
+        deck = nil
+        await rebuildDeck(decisions: [:])
+    }
+
+    /// A set decided (or reopened by undo) from Review → Sets. Resolved
+    /// sets leave the Triage deck; pending ones come back to it.
+    func setGroupState(id: String, _ state: GroupState) async {
+        await persistence.saveGroupState(id: id, state: state)
         await rebuildDeck(decisions: currentDecisions)
     }
 
@@ -338,9 +426,7 @@ final class AppModel {
         let deletedIdentifiers: [String] = deletable.map(\.localIdentifier)
 
         do {
-            try await PHPhotoLibrary.shared().performChanges {
-                PHAssetChangeRequest.deleteAssets(NSArray(array: deletable))
-            }
+            try await Self.deleteAssets(identifiers: deletedIdentifiers)
         } catch {
             // Declining the system confirmation is not a failure state,
             // just no deletion. Anything else is reported.
@@ -367,6 +453,17 @@ final class AppModel {
 
         await rescanLibrary()
         return true
+    }
+
+    /// The PhotoKit transaction itself. `nonisolated` on purpose: PhotoKit
+    /// runs the change block on its own queue, and a block formed inside
+    /// this main-actor class would inherit main-actor isolation and trap
+    /// at runtime the moment PhotoKit calls it.
+    nonisolated private static func deleteAssets(identifiers: [String]) async throws {
+        try await PHPhotoLibrary.shared().performChanges {
+            let assets = PHAsset.fetchAssets(withLocalIdentifiers: identifiers, options: nil)
+            PHAssetChangeRequest.deleteAssets(assets)
+        }
     }
 
     // MARK: - Home screen helpers

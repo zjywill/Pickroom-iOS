@@ -14,11 +14,13 @@ struct CommitSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var isCommitting = false
-    @State private var showReport = false
+    @State private var showedGrid = false
 
     var body: some View {
         Group {
-            if model.commitCandidates.isEmpty {
+            // Once the grid is up it stays, even when every photo has
+            // been tapped to keep — so the last one can be tapped back.
+            if model.commitCandidates.isEmpty && !showedGrid {
                 emptyState
             } else {
                 reviewContent
@@ -28,11 +30,6 @@ struct CommitSheet: View {
         .campNavigationBar("Commit", background: Camp.sheet, showsGrabber: true) {
             CampBarButton(kind: .close, accessibilityLabel: "Cancel") { dismiss() }
                 .disabled(isCommitting)
-        }
-        .sheet(isPresented: $showReport) {
-            ReportView()
-                .environment(model)
-                .campSheet()
         }
     }
 
@@ -54,32 +51,38 @@ struct CommitSheet: View {
 
     private var reviewContent: some View {
         VStack(spacing: 0) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    // Wording that matches what will actually happen.
-                    HStack(alignment: .top, spacing: 14) {
-                        IconBadge(systemImage: "trash.fill", fill: Camp.stone, size: 52)
-                        VStack(alignment: .leading, spacing: 5) {
-                            Text(
-                                CommitComposer.headline(
-                                    count: model.commitCandidates.count,
-                                    situation: model.diagnosis
-                                )
+            // Every photo about to go, as evidence. Tap one to keep it
+            // (it stays in place, marked "Kept"); ⤢ to look closer.
+            AssetBrowser(
+                keys: model.commitCandidates,
+                cellSize: 88
+            ) {
+                // Wording that matches what will actually happen.
+                HStack(alignment: .top, spacing: 14) {
+                    IconBadge(systemImage: "trash.fill", fill: Camp.stone, size: 52)
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(
+                            CommitComposer.headline(
+                                count: model.commitCandidates.count,
+                                situation: model.diagnosis
                             )
-                            .font(Camp.display(.title2, weight: .semibold))
-                            .foregroundStyle(Camp.ink)
-                            Text(CommitComposer.supportingLine())
-                                .font(.subheadline)
-                                .foregroundStyle(Camp.muted)
-                        }
+                        )
+                        .font(Camp.display(.title2, weight: .semibold))
+                        .foregroundStyle(Camp.ink)
+                        Text(CommitComposer.supportingLine())
+                            .font(.subheadline)
+                            .foregroundStyle(Camp.muted)
                     }
-
-                    rejectGrid
-
-                    Text("Touch and hold a photo to keep it instead.")
+                }
+                .padding(.top, 8)
+                .padding(.bottom, 4)
+            } footer: {
+                VStack(alignment: .leading, spacing: 16) {
+                    Text("Something here you want to keep? Tap it. Tap again to put it back.")
                         .font(.footnote.weight(.bold))
                         .foregroundStyle(Camp.muted)
                         .frame(maxWidth: .infinity)
+                        .multilineTextAlignment(.center)
 
                     if let error = model.lastCommitError {
                         notice(error, systemImage: "exclamationmark.triangle.fill", fill: Color(hex: 0xF9D9CF), badge: Camp.toss, ink: Camp.tossEdge)
@@ -95,11 +98,12 @@ struct CommitSheet: View {
                         )
                     }
                 }
-                .padding(20)
+                .padding(.top, 4)
             }
 
             commitBar
         }
+        .onAppear { showedGrid = true }
     }
 
     private func notice(_ text: String, systemImage: String, fill: Color, badge: Color, ink: Color) -> some View {
@@ -112,28 +116,6 @@ struct CommitSheet: View {
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(fill))
-    }
-
-    /// The full set as a grid — evidence, before anything leaves the
-    /// library.
-    private var rejectGrid: some View {
-        LazyVGrid(
-            columns: [GridItem(.adaptive(minimum: 76), spacing: 10)],
-            spacing: 12
-        ) {
-            ForEach(model.commitCandidates, id: \.self) { key in
-                // Touch and hold keeps the photo straight away — it
-                // leaves this grid, which is the confirmation.
-                RejectThumb(assetKey: key)
-                    .onLongPressGesture(minimumDuration: 0.4) {
-                        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                        withAnimation(.snappy) { model.deck?.unmark(key: key) }
-                    }
-                    .accessibilityAction(named: "Keep this photo") {
-                        model.deck?.unmark(key: key)
-                    }
-            }
-        }
     }
 
     private var commitBar: some View {
@@ -162,7 +144,7 @@ struct CommitSheet: View {
             font: Camp.display(.headline, weight: .semibold),
             verticalPadding: 16
         ))
-        .disabled(isCommitting)
+        .disabled(isCommitting || model.commitCandidates.isEmpty)
         .padding(.horizontal, 20)
         .padding(.top, 12)
         .padding(.bottom, 8)
@@ -177,148 +159,14 @@ struct CommitSheet: View {
             // the only code path in the app that deletes anything.
             let success = await model.commitDeletion()
             isCommitting = false
+            // Done: the sheet gets out of the way and the deck shows a
+            // self-dismissing banner — nothing more to close after
+            // iOS's own confirmation.
             if success {
-                showReport = true
+                dismiss()
             }
             // A cancelled system confirmation is not an error; stay on
             // the sheet so the user can try again or cancel.
         }
-    }
-}
-
-private struct RejectThumb: View {
-    @Environment(AppModel.self) private var model
-    let assetKey: String
-    @State private var image: UIImage?
-
-    var body: some View {
-        Group {
-            if let image {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFill()
-            } else {
-                Rectangle().fill(Camp.sand)
-            }
-        }
-        .frame(width: 76, height: 76)
-        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Camp.panelEdge)
-                .offset(y: 3)
-        )
-        .task(id: assetKey) {
-            let identifier = String(assetKey.dropFirst("photos:".count))
-            image = await model.imageProvider.thumbnail(for: identifier)
-        }
-    }
-}
-
-/// The post-commit report: photos deleted first, the live Recently
-/// Deleted pending figure, and storage before/after — evidence the
-/// session was worth it, never a promise made in advance.
-struct ReportView: View {
-    @Environment(AppModel.self) private var model
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                if let report = model.lastCommitReport {
-                    VStack(spacing: 10) {
-                        Raccoon(mood: .content)
-                            .frame(width: 96)
-                        Text("\(report.deletedCount.formatted()) photos deleted")
-                            .font(Camp.display(.title, weight: .semibold))
-                            .foregroundStyle(Camp.ink)
-                        Label(
-                            "Moved to Recently Deleted — erased after 30 days",
-                            systemImage: "clock.badge.checkmark"
-                        )
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(Camp.muted)
-                    }
-                    .multilineTextAlignment(.center)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 8)
-
-                    VStack(alignment: .leading, spacing: 12) {
-                        CampTag(text: "Space")
-                        storageRow(report)
-                        if report.storageBefore.totalCapacity > 0 {
-                            // The device storage bar the user already
-                            // has an intuition for.
-                            StorageBar(
-                                available: report.storageBefore.availableCapacity,
-                                total: report.storageBefore.totalCapacity
-                            )
-                        }
-                    }
-                    .campPanel(padding: 18)
-                }
-
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack(spacing: 12) {
-                        IconBadge(systemImage: "trash.fill", fill: Camp.wood, size: 36)
-                        Text("\(model.recentlyDeletedPending.formatted()) photos pending in Recently Deleted")
-                            .font(.subheadline.weight(.heavy))
-                            .foregroundStyle(Camp.ink)
-                    }
-                    Text("Space is not freed until Recently Deleted is emptied. Pickroom will never empty it for you — that step is yours, in the Photos app.")
-                        .font(.footnote)
-                        .foregroundStyle(Camp.muted)
-                    Link(destination: URL(string: "photos-redirect://")!) {
-                        Label("Open Photos", systemImage: "arrow.up.right")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.wood)
-                    .padding(.top, 4)
-                }
-                .campPanel(padding: 18)
-            }
-            .padding(20)
-        }
-        .background(Camp.sheet)
-        .campNavigationBar("Session report", background: Camp.sheet, showsGrabber: true) {
-            EmptyView()
-        } trailing: {
-            CampBarButton(kind: .done) { dismiss() }
-        }
-    }
-
-    @ViewBuilder
-    private func storageRow(_ report: AppModel.CommitReport) -> some View {
-        let after = DeviceStorageSnapshot.current()
-        let freed = after.availableCapacity - report.storageBefore.availableCapacity
-        if freed > 0 {
-            Text("About \(ByteCountFormatter.string(fromByteCount: freed, countStyle: .file)) freed on this device")
-                .font(.subheadline.weight(.bold))
-                .foregroundStyle(Camp.ink)
-        } else {
-            Text("Storage updates may lag a moment while iOS reconciles")
-                .font(.subheadline)
-                .foregroundStyle(Camp.muted)
-        }
-    }
-}
-
-/// The device storage bar, before/after.
-struct StorageBar: View {
-    let available: Int64
-    let total: Int64
-
-    var body: some View {
-        GeometryReader { geometry in
-            let used = max(0, min(1, 1 - Double(available) / Double(max(total, 1))))
-            ZStack(alignment: .leading) {
-                Capsule().fill(Camp.sand)
-                Capsule()
-                    .fill(Camp.later)
-                    .frame(width: geometry.size.width * used)
-            }
-        }
-        .frame(height: 12)
-        .accessibilityLabel("Storage \(Int((1 - Double(available) / Double(max(total, 1))) * 100)) percent used")
     }
 }

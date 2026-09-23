@@ -8,6 +8,7 @@ struct InspectView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     let assetKey: String
+    var showsClose = true
 
     @State private var image: UIImage?
     @State private var scale: CGFloat = 1
@@ -25,34 +26,36 @@ struct InspectView: View {
                         .scaleEffect(scale)
                         .offset(offset)
                         .gesture(
-                            SimultaneousGesture(
-                                MagnificationGesture()
-                                    .onChanged { value in
-                                        scale = max(1, min(6, lastScale * value))
-                                    }
-                                    .onEnded { _ in
-                                        lastScale = scale
-                                        if scale <= 1.01 {
-                                            withAnimation(.spring(response: 0.3)) {
-                                                scale = 1
-                                                lastScale = 1
-                                                offset = .zero
-                                                lastOffset = .zero
-                                            }
+                            MagnificationGesture()
+                                .onChanged { value in
+                                    scale = max(1, min(6, lastScale * value))
+                                }
+                                .onEnded { _ in
+                                    lastScale = scale
+                                    if scale <= 1.01 {
+                                        withAnimation(.spring(response: 0.3)) {
+                                            scale = 1
+                                            lastScale = 1
+                                            offset = .zero
+                                            lastOffset = .zero
                                         }
-                                    },
-                                DragGesture()
-                                    .onChanged { value in
-                                        guard scale > 1 else { return }
-                                        offset = CGSize(
-                                            width: lastOffset.width + value.translation.width,
-                                            height: lastOffset.height + value.translation.height
-                                        )
                                     }
-                                    .onEnded { _ in
-                                        lastOffset = offset
-                                    }
-                            )
+                                }
+                        )
+                        // Panning only while zoomed in, so a swipe at 1×
+                        // still pages the viewer.
+                        .simultaneousGesture(
+                            DragGesture()
+                                .onChanged { value in
+                                    offset = CGSize(
+                                        width: lastOffset.width + value.translation.width,
+                                        height: lastOffset.height + value.translation.height
+                                    )
+                                }
+                                .onEnded { _ in
+                                    lastOffset = offset
+                                },
+                            including: scale > 1 ? .all : .subviews
                         )
                         .onTapGesture(count: 2) {
                             withAnimation(.spring(response: 0.3)) {
@@ -76,9 +79,11 @@ struct InspectView: View {
             // palette; only the control is themed.
             .background(.black)
 
-            CampBarButton(kind: .close) { dismiss() }
-                .padding(.horizontal, 16)
-                .padding(.top, 8)
+            if showsClose {
+                CampBarButton(kind: .close) { dismiss() }
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+            }
         }
         .task {
             let identifier = String(assetKey.dropFirst("photos:".count))

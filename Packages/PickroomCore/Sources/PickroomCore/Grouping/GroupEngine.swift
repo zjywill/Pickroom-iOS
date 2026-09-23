@@ -35,6 +35,10 @@ public struct GroupEngineConfiguration: Sendable {
     /// Vision-backed implementation; tests use Euclidean.
     public var metric: any FeaturePrintMetric
 
+    /// Screenshots and screen recordings younger than this are grouped
+    /// but not pre-marked — they are probably still in use.
+    public var utilityExpiryAge: TimeInterval
+
     public init(
         sessionGap: TimeInterval = 4 * 3600,
         candidateWindow: TimeInterval = 3600,
@@ -43,8 +47,10 @@ public struct GroupEngineConfiguration: Sendable {
         bracketMinEVSpan: Double = 0.5,
         bracketMaxCount: Int = 7,
         degenerateDateCutoff: Date = GroupEngineConfiguration.defaultDegenerateDateCutoff,
-        metric: any FeaturePrintMetric = EuclideanFeaturePrintMetric()
+        metric: any FeaturePrintMetric = EuclideanFeaturePrintMetric(),
+        utilityExpiryAge: TimeInterval = 30 * 24 * 3600
     ) {
+        self.utilityExpiryAge = utilityExpiryAge
         self.sessionGap = sessionGap
         self.candidateWindow = candidateWindow
         self.thresholds = thresholds
@@ -148,7 +154,7 @@ public struct GroupEngine: Sendable {
             ungrouped.filter { !consumed.contains($0.key) }
         )
         groups.append(contentsOf: failedFrames)
-        summary.failedFrameCount = assets.filter { $0.quality?.isBad == true }.count
+        summary.failedFrameCount = assets.filter { $0.quality?.tier == .obviouslyBroken }.count
 
         // Apply persisted state; the group id is stable across rescans,
         // so a dismissal recorded last month still holds.
@@ -226,11 +232,10 @@ public struct GroupEngine: Sendable {
         _ assets: [AssetRecord],
         now: Date
     ) -> [PhotoGroup] {
-        let utility = assets.filter { asset in
-            if asset.isExpiredUtilityByMetadata { return true }
-            if asset.mediaType == .image, asset.isUtility == true { return true }
-            return false
-        }
+        // Screenshots and screen recordings only. Vision's `isUtility`
+        // also catches receipts, documents and saved images — the
+        // user's own content, which is not "expired" by being useful.
+        let utility = assets.filter(\.isExpiredUtilityByMetadata)
         guard !utility.isEmpty else { return [] }
 
         var calendar = Calendar(identifier: .gregorian)
@@ -255,7 +260,12 @@ public struct GroupEngine: Sendable {
             let keys = sorted.map(\.key)
             // Only .userLibrary assets may be deleted — pre-filtered
             // long before the commit screen.
-            let deletable = sorted.filter(\.isProposable).map(\.key)
+            // Only what has had time to expire is pre-marked: a
+            // screenshot from last week is probably still in use.
+            let cutoff = now.addingTimeInterval(-configuration.utilityExpiryAge)
+            let deletable = sorted
+                .filter { $0.isProposable && (usableDate($0).map { $0 < cutoff } ?? true) }
+                .map(\.key)
             let youngest = sorted.compactMap(\.capturedAt).min() ?? now
             let age = now.timeIntervalSince(youngest)
             let certainty = min(0.9, 0.5 + 0.4 * min(age / (180 * 24 * 3600), 1))
@@ -340,13 +350,18 @@ public struct GroupEngine: Sendable {
             // source frames, which look blown out or black by design.
             // Focus failures still flag; exposure-based badness inside a
             // burst does not — that is exactly the HDR-source signature.
-            let flagged = focusFlaggedKeys(sorted)
+            //
+            // Blur is never a proposal either: a sharpness measure on a
+            // small render reads sky, water, night and soft light as
+            // "out of focus". It only steers which frame is suggested as
+            // the keeper; the user decides what goes.
+            let flagged: [String] = []
             let keeper = sorted.first { $0.isBurstUserPick } ?? sorted.first { $0.isBurstAutoPick }
-            let flaggedFraction = keys.isEmpty ? 0 : Double(flagged.count) / Double(keys.count)
-            let certainty = flagged.isEmpty ? 0.55 : min(0.87, 0.72 + 0.15 * flaggedFraction)
-            let headline = flagged.isEmpty
+            let soft = softKeys(sorted).count
+            let certainty = soft == 0 ? 0.55 : min(0.87, 0.72 + 0.15 * Double(soft) / Double(max(keys.count, 1)))
+            let headline = soft == 0
                 ? "Burst — \(keys.count) shots"
-                : "\(keys.count) shots · \(flagged.count) blurred"
+                : "\(keys.count) shots · \(soft) may be soft"
 
             groups.append(
                 PhotoGroup(
@@ -488,20 +503,29 @@ public struct GroupEngine: Sendable {
             let sorted = members.sorted { order($0, $1) }
             let keys = sorted.map(\.key)
 
-            // Versions guard: an original and its edit never form a
-            // deletion prompt.
+            // Original + edit, saved as separate photos: keep the edit
+            // (the newest one if there are several) and pre-mark the
+            // unedited originals. The edit is what the user meant to
+            // keep; the original is the leftover.
             if sorted.contains(where: \.isEditedVersion) {
+                let edits = sorted.filter(\.isEditedVersion)
+                let keeper = edits.first(where: \.isFavorite)
+                    ?? edits.max { ($0.modificationDate ?? .distantPast) < ($1.modificationDate ?? .distantPast) }
+                    ?? edits[0]
+                let originals = sorted.filter { !$0.isEditedVersion && $0.isProposable }.map(\.key)
                 groups.append(
                     PhotoGroup(
                         id: PhotoGroup.makeID(kind: .versions, memberKeys: keys),
                         kind: .versions,
                         memberKeys: keys,
-                        representativeKey: keys[0],
+                        representativeKey: keeper.key,
                         span: span(of: sorted),
-                        certainty: 0.15,
-                        flaggedKeys: [],
-                        suggestedKeeperKey: nil,
-                        headline: "Original and edited version — keep both"
+                        certainty: 0.8,
+                        flaggedKeys: originals,
+                        suggestedKeeperKey: keeper.key,
+                        headline: originals.isEmpty
+                            ? "Original and edited version"
+                            : "Edited version — the original can go"
                     )
                 )
                 continue
@@ -511,12 +535,14 @@ public struct GroupEngine: Sendable {
             // with a dark and a bright member is far more likely an
             // exposure bracket imported from a camera (whose EV the
             // library may not report) than two failed shots.
-            let flagged = focusFlaggedKeys(sorted)
+            // Blur never pre-marks — see the burst note.
+            let flagged: [String] = []
+            let soft = softKeys(sorted).count
             let margin = sorted.compactMap { margins[$0.key] }.max() ?? 0
             let certainty = 0.3 + 0.2 * margin
-            let headline = flagged.isEmpty
+            let headline = soft == 0
                 ? "\(keys.count) near-identical shots"
-                : "\(keys.count) near-identical shots · \(flagged.count) blurred"
+                : "\(keys.count) near-identical shots · \(soft) may be soft"
 
             groups.append(
                 PhotoGroup(
@@ -544,7 +570,10 @@ public struct GroupEngine: Sendable {
     private func makeFailedFrameGroups(_ assets: [AssetRecord]) -> [PhotoGroup] {
         var groups: [PhotoGroup] = []
         for asset in assets.sorted(by: { order($0, $1) }) {
-            guard let quality = asset.quality, quality.isBad else { continue }
+            // Only frames that are not photographs of anything get a
+            // card. "Probably blurred" was mostly sky, water and night
+            // shots — noise, not failures.
+            guard let quality = asset.quality, quality.tier == .obviouslyBroken else { continue }
             let obviouslyBroken = quality.tier == .obviouslyBroken
             let deletable = asset.isProposable
             groups.append(
@@ -613,14 +642,13 @@ public struct GroupEngine: Sendable {
     /// Focus-based badness only, for members of any multi-frame group:
     /// an exposure judgement among near-identical frames is more likely
     /// an HDR/bracket source frame than a failed shot.
-    private func focusFlaggedKeys(_ assets: [AssetRecord]) -> [String] {
+    /// Members whose focus measure came out low (exposure excluded —
+    /// that is the HDR-source signature). A description only, never a
+    /// proposal.
+    private func softKeys(_ assets: [AssetRecord]) -> [String] {
         assets
             .filter { asset in
-                guard
-                    let quality = asset.quality,
-                    quality.isBad,
-                    asset.isProposable
-                else { return false }
+                guard let quality = asset.quality, quality.isBad else { return false }
                 return !quality.isExposureBased
             }
             .map(\.key)

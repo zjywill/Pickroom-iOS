@@ -317,7 +317,7 @@ One card at a time, full screen, thumb-driven:
 - **Swipe left** — discard.
 - **Swipe up** — decide later.
 - **Tap** — inspect larger, pinch to zoom.
-- **Long press** — see the whole group.
+- **"Whole set" button** — see the whole group. No gesture in the app is a hidden long press; in every grid a tap marks a photo (tap again to keep), and a corner button opens it large.
 
 Haptics on every commit. **No confirmation dialogs during triage** — the entire
 value is rhythm, and a dialog every few seconds destroys it. Safety comes from

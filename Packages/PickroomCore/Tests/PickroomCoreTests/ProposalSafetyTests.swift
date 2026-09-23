@@ -61,7 +61,7 @@ final class NearDuplicateExposureTests: XCTestCase {
         let (groups, _) = GroupEngine().makeGroups(assets: assets)
         let group = try XCTUnwrap(groups.first { $0.kind == .nearDuplicate })
         XCTAssertEqual(group.memberKeys.count, 3)
-        XCTAssertEqual(group.flaggedKeys, ["blur"])
+        XCTAssertTrue(group.flaggedKeys.isEmpty, "neither exposure nor blur pre-marks a near-duplicate")
     }
 }
 

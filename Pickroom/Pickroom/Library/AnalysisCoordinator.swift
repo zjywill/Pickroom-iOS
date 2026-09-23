@@ -78,6 +78,16 @@ final class AnalysisCoordinator {
     /// 0…1 over the current analysis batch.
     private(set) var progress: Double = 0
     private(set) var lastMessage: String?
+    /// Images analysed so far / images the current pass has to analyse.
+    private(set) var processedCount = 0
+    private(set) var pendingCount = 0
+
+    /// Stage A′ results on disk, so a relaunch or rescan analyses only
+    /// new and edited photos — on a 50,000-photo library that is the
+    /// difference between minutes and hours. Loaded off the main
+    /// thread on first use.
+    private var qualityCache: QualityCache?
+    private var qualityCacheDirty = false
 
     private var fingerprintCache: FingerprintCache
     private var metadataCache: CandidateMetadataCache
@@ -117,14 +127,29 @@ final class AnalysisCoordinator {
     /// failed-frame tiers, aesthetics, face capture *and* the exact
     /// duplicate hash — no second pass over the library. Pauses on
     /// thermal pressure and Low Power Mode, and stops when cancelled.
-    func analyseQuality(records: [AssetRecord]) async -> [AssetRecord] {
+    /// Every `checkpointInterval` images the partial result is handed to
+    /// `checkpoint`, so the deck improves while a big library is still
+    /// being analysed; the cache is written every `saveInterval`.
+    func analyseQuality(
+        records: [AssetRecord],
+        checkpointInterval: Int = 1000,
+        saveInterval: Int = 200,
+        checkpoint: (([AssetRecord]) async -> Void)? = nil
+    ) async -> [AssetRecord] {
         let pending = records.indices.filter {
             records[$0].mediaType == .image && records[$0].quality == nil
         }
         guard !pending.isEmpty else { return records }
         isAnalysing = true
         progress = 0
-        defer { isAnalysing = false }
+        processedCount = 0
+        pendingCount = pending.count
+        lastMessage = nil
+        defer {
+            isAnalysing = false
+            saveQualityCache()
+        }
+        if qualityCache == nil { qualityCache = await Self.loadQualityCache(from: qualityCacheURL) }
 
         var updated = records
         let analyzer = QualityAnalyzer()
@@ -133,6 +158,7 @@ final class AnalysisCoordinator {
             guard await waitWhilePaused("Paused — device is hot or in Low Power Mode") else {
                 return updated
             }
+            if lastMessage != nil { lastMessage = nil }
             let record = records[position]
             let identifier = Self.identifier(record)
             if let rendition = await imageProvider.analysisRendition(for: identifier) {
@@ -147,13 +173,66 @@ final class AnalysisCoordinator {
                     pixelWidth: record.pixelWidth,
                     pixelHeight: record.pixelHeight
                 )
+                // A stand-in (degraded iCloud thumbnail) is re-scored once
+                // the real rendition is local, so it is not saved.
+                if !updated[position].scoredFromStandIn {
+                    qualityCache?.store(updated[position])
+                    qualityCacheDirty = true
+                }
             }
+            processedCount = done + 1
             progress = Double(done + 1) / Double(pending.count)
+            if (done + 1) % saveInterval == 0 { saveQualityCache() }
+            if (done + 1) % checkpointInterval == 0, done + 1 < pending.count, let checkpoint {
+                await checkpoint(updated)
+            }
             if done % 25 == 0 {
                 await Task.yield()
             }
         }
         return updated
+    }
+
+    /// Fills in Stage A′ results saved by earlier runs. Entries for
+    /// photos no longer in the library are dropped.
+    func applyCachedQuality(to records: [AssetRecord]) async -> [AssetRecord] {
+        if qualityCache == nil { qualityCache = await Self.loadQualityCache(from: qualityCacheURL) }
+        guard var cache = qualityCache else { return records }
+        let applied = records.map { record -> AssetRecord in
+            guard record.mediaType == .image, record.quality == nil else { return record }
+            return cache.apply(to: record)
+        }
+        if cache.prune(retaining: Set(records.map(\.key))) {
+            qualityCache = cache
+            qualityCacheDirty = true
+            saveQualityCache()
+        }
+        return applied
+    }
+
+    /// Forgets every saved result — the next pass analyses everything.
+    func clearCaches() {
+        qualityCache = QualityCache()
+        qualityCacheDirty = true
+        saveQualityCache()
+    }
+
+    private var qualityCacheURL: URL {
+        storageDirectory.appendingPathComponent("quality.plist")
+    }
+
+    private nonisolated static func loadQualityCache(from url: URL) async -> QualityCache {
+        await Task.detached(priority: .utility) { QualityCache.load(from: url) }.value
+    }
+
+    /// Encodes on the main actor (a value copy) and writes off it.
+    private func saveQualityCache() {
+        guard qualityCacheDirty, let cache = qualityCache else { return }
+        qualityCacheDirty = false
+        let url = qualityCacheURL
+        Task.detached(priority: .utility) {
+            try? cache.save(to: url)
+        }
     }
 
     // MARK: - Candidate metadata (versions guard, bracket guard)
@@ -449,6 +528,87 @@ struct CandidateMetadataCache: Sendable {
     mutating func set(_ entry: Entry, for record: AssetRecord) {
         entries[Self.cacheKey(record)] = entry
     }
+
+    private static func cacheKey(_ record: AssetRecord) -> String {
+        "\(record.key)|\(record.modificationDate?.timeIntervalSinceReferenceDate ?? 0)"
+    }
+}
+
+/// Stage A′ results per asset, keyed by asset key and modification date
+/// so an edit re-analyses the photo.
+struct QualityCache: Sendable {
+    struct Entry: Codable, Sendable {
+        var quality: QualityAssessment
+        var aestheticsScore: Double?
+        var isUtility: Bool?
+        var faceCaptureQuality: Double?
+        var scoredFromStandIn: Bool
+        var contentHash: Data?
+    }
+
+    private var entries: [String: Entry] = [:]
+    /// Asset key → cache key, for pruning.
+    private var keyIndex: [String: String] = [:]
+
+    static func load(from url: URL) -> QualityCache {
+        guard
+            let data = try? Data(contentsOf: url),
+            let entries = try? PropertyListDecoder().decode([String: Entry].self, from: data)
+        else { return QualityCache() }
+        var cache = QualityCache()
+        cache.entries = entries
+        for cacheKey in entries.keys {
+            if let bar = cacheKey.lastIndex(of: "|") {
+                cache.keyIndex[String(cacheKey[..<bar])] = cacheKey
+            }
+        }
+        return cache
+    }
+
+    func save(to url: URL) throws {
+        let encoder = PropertyListEncoder()
+        encoder.outputFormat = .binary
+        try encoder.encode(entries).write(to: url, options: .atomic)
+    }
+
+    mutating func store(_ record: AssetRecord) {
+        guard let quality = record.quality else { return }
+        let cacheKey = Self.cacheKey(record)
+        if let old = keyIndex[record.key], old != cacheKey { entries[old] = nil }
+        keyIndex[record.key] = cacheKey
+        entries[cacheKey] = Entry(
+            quality: quality,
+            aestheticsScore: record.aestheticsScore,
+            isUtility: record.isUtility,
+            faceCaptureQuality: record.faceCaptureQuality,
+            scoredFromStandIn: record.scoredFromStandIn,
+            contentHash: record.contentHash
+        )
+    }
+
+    func apply(to record: AssetRecord) -> AssetRecord {
+        guard let entry = entries[Self.cacheKey(record)] else { return record }
+        var filled = record
+        filled.quality = entry.quality
+        filled.aestheticsScore = entry.aestheticsScore
+        filled.isUtility = entry.isUtility
+        filled.faceCaptureQuality = entry.faceCaptureQuality
+        filled.scoredFromStandIn = entry.scoredFromStandIn
+        filled.contentHash = entry.contentHash
+        return filled
+    }
+
+    /// Drops entries for assets not in `keys`. Returns whether anything
+    /// was removed.
+    mutating func prune(retaining keys: Set<String>) -> Bool {
+        let gone = keyIndex.keys.filter { !keys.contains($0) }
+        for key in gone {
+            if let cacheKey = keyIndex.removeValue(forKey: key) { entries[cacheKey] = nil }
+        }
+        return !gone.isEmpty
+    }
+
+    var count: Int { entries.count }
 
     private static func cacheKey(_ record: AssetRecord) -> String {
         "\(record.key)|\(record.modificationDate?.timeIntervalSinceReferenceDate ?? 0)"

@@ -41,9 +41,9 @@ final class FailedFrameTieringTests: XCTestCase {
         XCTAssertEqual(assessment.tier, .ok, "a sharp subject over a soft background is a good photograph")
     }
 
-    /// `probablyBad` never receives a proposal: the engine emits the
-    /// card with no flagged keys, so no bulk action can exist for it.
-    func testProbablyBadNeverReceivesProposal() throws {
+    /// `probablyBad` never becomes a card: "probably blurred" was
+    /// mostly sky, water and night shots.
+    func testProbablyBadNeverBecomesACard() throws {
         let bad = detector.assess(Fixtures.softPlane())
         XCTAssertEqual(bad.tier, .probablyBad)
         let assets = [
@@ -51,10 +51,8 @@ final class FailedFrameTieringTests: XCTestCase {
             Fixtures.asset("fine", capturedAt: Fixtures.base.addingTimeInterval(3600)),
         ]
         let (groups, _) = GroupEngine().makeGroups(assets: assets)
-        let card = try XCTUnwrap(groups.first { $0.kind == .failedFrame })
-        XCTAssertEqual(card.memberKeys, ["soft"])
-        XCTAssertTrue(card.flaggedKeys.isEmpty, "probablyBad is ordering only — never a proposal")
-        XCTAssertTrue(card.headline.hasPrefix("Probably"), card.headline)
+        XCTAssertTrue(groups.filter { $0.kind == .failedFrame }.isEmpty)
+        XCTAssertTrue(groups.allSatisfy { !$0.flaggedKeys.contains("soft") })
     }
 
     func testObviouslyBrokenReceivesProposal() throws {
@@ -69,7 +67,7 @@ final class FailedFrameTieringTests: XCTestCase {
     /// A lone failed frame needs no siblings to be surfaced — it gets
     /// its own card.
     func testLoneBadFrameIsSurfacedWithoutSiblings() {
-        let bad = detector.assess(Fixtures.softPlane())
+        let bad = detector.assess(Fixtures.solidPlane(value: 0))
         let assets = [Fixtures.asset("alone", capturedAt: Fixtures.base, quality: bad)]
         let (groups, _) = GroupEngine().makeGroups(assets: assets)
         XCTAssertEqual(groups.filter { $0.kind == .failedFrame }.count, 1)
@@ -99,12 +97,26 @@ final class ExpiredUtilityOrderingTests: XCTestCase {
         XCTAssertGreaterThan(older.certainty, newer.certainty, "certainty rises with age")
     }
 
-    func testUtilityFlagFromAestheticsCatchesSavedImages() {
+    /// Vision's `isUtility` catches receipts and documents — the user's
+    /// own content — so it never makes a photo "expired".
+    func testVisionUtilityFlagAloneIsNotExpired() {
         let assets = [
             Fixtures.asset("receipt", capturedAt: Fixtures.base, isUtility: true),
         ]
         let (groups, _) = GroupEngine().makeGroups(assets: assets)
-        XCTAssertEqual(groups.filter { $0.kind == .expiredUtility }.count, 1)
+        XCTAssertTrue(groups.filter { $0.kind == .expiredUtility }.isEmpty)
+    }
+
+    func testRecentScreenshotsAreGroupedButNotPreMarked() throws {
+        let now = Fixtures.base
+        let assets = [
+            Fixtures.asset("last-week", capturedAt: now.addingTimeInterval(-7 * 24 * 3600), isScreenshot: true),
+            Fixtures.asset("two-months", capturedAt: now.addingTimeInterval(-60 * 24 * 3600), isScreenshot: true),
+        ]
+        let (groups, _) = GroupEngine().makeGroups(assets: assets, now: now)
+        let bucket = try XCTUnwrap(groups.first { $0.kind == .expiredUtility })
+        XCTAssertEqual(bucket.memberKeys.count, 2)
+        XCTAssertEqual(bucket.flaggedKeys, ["two-months"], "only screenshots older than 30 days are pre-marked")
     }
 
     func testScreenshotsMatchSystemAlbumSemantics() {
@@ -138,7 +150,7 @@ final class ExpiredUtilityOrderingTests: XCTestCase {
 final class CertaintyOrderingTests: XCTestCase {
     func testMixedSetOrdersCheapestDecisionFirst() {
         let detector = FailedFrameDetector()
-        let bad = detector.assess(Fixtures.softPlane())
+        let bad = detector.assess(Fixtures.solidPlane(value: 0))
         let hash = Data([3, 3, 3])
         let identical = Fixtures.print([0.2, 0.4])
         let close = Fixtures.print([0.2, 0.395])

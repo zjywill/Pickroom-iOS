@@ -72,7 +72,8 @@ final class ReviewFixTests: XCTestCase {
             persistence: persistence
         )
         deck.makeKeeper(memberKey: "photos:b")
-        XCTAssertTrue(deck.currentCard?.markedKeys.isEmpty == true)
+        XCTAssertFalse(deck.currentCard?.markedKeys.contains("photos:b") == true, "the new keeper is unmarked")
+        XCTAssertEqual(deck.currentCard?.markedKeys, ["photos:a"], "keep-one default: the rest is marked")
     }
 
     func testPickFromEarlierSessionIsNeverPreMarked() {
@@ -248,5 +249,32 @@ final class ReviewFixTests: XCTestCase {
         ]
         let keys = AnalysisCoordinator.bracketCandidateKeys(assets, configuration: GroupEngineConfiguration())
         XCTAssertEqual(keys, ["photos:a", "photos:b"])
+    }
+}
+
+/// Triage's "Start over": decisions and decided sets are cleared; ignored
+/// sets stay ignored unless asked.
+final class StartOverTests: XCTestCase {
+    func testStartOverClearsDecisionsAndDecidedSets() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("start-over-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = PersistenceStore(directory: directory)
+        await store.saveDecisions(["photos:a": .reject, "photos:b": .pick])
+        await store.saveGroupState(id: "done", state: .resolved)
+        await store.saveGroupState(id: "ignored", state: .dismissed)
+
+        await store.startOver(includingIgnored: false)
+        let relaunched = PersistenceStore(directory: directory)
+        let decisions = await relaunched.loadDecisions()
+        let states = await relaunched.loadGroupStates()
+        let session = await relaunched.loadSession()
+        XCTAssertTrue(decisions.isEmpty)
+        XCTAssertEqual(states, ["ignored": .dismissed])
+        XCTAssertNil(session)
+
+        await relaunched.startOver(includingIgnored: true)
+        let cleared = await relaunched.loadGroupStates()
+        XCTAssertTrue(cleared.isEmpty)
     }
 }
