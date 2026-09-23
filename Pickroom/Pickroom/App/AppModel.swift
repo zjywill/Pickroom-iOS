@@ -55,6 +55,7 @@ final class AppModel {
     }
 
     private var engine = GroupEngine()
+    private var rebuildGeneration = 0
 
     init() {
         analysis = AnalysisCoordinator(
@@ -114,7 +115,7 @@ final class AppModel {
             isObservingLibrary = true
             await library.observeChanges { [weak self] in
                 Task { @MainActor in
-                    await self?.rescanLibrary()
+                    self?.scheduleRescan()
                 }
             }
         }
@@ -172,11 +173,19 @@ final class AppModel {
     /// Re-runs the engine over the current records. Group state and
     /// decisions persist, so this is cheap and loses nothing.
     private func rebuildDeck(decisions: [String: PhotoDecision]) async {
+        rebuildGeneration += 1
+        let generation = rebuildGeneration
         let groupStates = await persistence.loadGroupStates()
-        let (newGroups, newSummary) = engine.makeGroups(
-            assets: records,
-            groupStates: groupStates
-        )
+        // The engine is pure; on a library of thousands it takes long
+        // enough to freeze the UI, so it runs off the main thread over
+        // a snapshot.
+        let engine = engine
+        let records = records
+        let (newGroups, newSummary) = await Task.detached(priority: .userInitiated) {
+            engine.makeGroups(assets: records, groupStates: groupStates)
+        }.value
+        // A newer rebuild started while this one ran; its result wins.
+        guard generation == rebuildGeneration else { return }
         groups = newGroups
         summary = newSummary
 
@@ -202,7 +211,9 @@ final class AppModel {
     /// current records. Only one pipeline ever runs at a time.
     private func restartAnalysis() {
         analysisTask?.cancel()
-        analysisTask = Task { [weak self] in
+        // Utility priority: the UI (and the thumbnails it asks PhotoKit
+        // for) always goes first.
+        analysisTask = Task(priority: .utility) { [weak self] in
             await self?.runAnalysis()
         }
     }
@@ -230,6 +241,11 @@ final class AppModel {
         let fingerprinted = await analysis.fingerprintCandidates(records: records)
         guard !Task.isCancelled else { return }
         await mergeAnalysis(fingerprinted)
+
+        // Photos added while this pass ran.
+        if analysis.needsQualityPass(records) {
+            restartAnalysis()
+        }
     }
 
     private var currentDecisions: [String: PhotoDecision] {
@@ -286,6 +302,21 @@ final class AppModel {
 
     // MARK: - Library changes
 
+    private var pendingRescan: Task<Void, Never>?
+
+    /// PhotoKit reports a change for every iCloud sync batch, favourite
+    /// and edit — on a syncing library several a second. Each one used
+    /// to re-read the whole library and restart analysis; now a burst
+    /// of changes becomes one rescan once things go quiet.
+    private func scheduleRescan() {
+        pendingRescan?.cancel()
+        pendingRescan = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(2))
+            guard !Task.isCancelled else { return }
+            await self?.rescanLibrary()
+        }
+    }
+
     private func rescanLibrary() async {
         guard canTriage else { return }
         let fresh = await library.loadAssetRecords()
@@ -295,7 +326,9 @@ final class AppModel {
         markScanned()
         await rebuildDeck(decisions: currentDecisions)
         await loadVideoSizes()
-        if records.contains(where: { $0.mediaType == .image && $0.quality == nil }) {
+        // A running pass picks up newcomers when it finishes; restarting
+        // it would throw away its place.
+        if !analysis.isAnalysing, analysis.needsQualityPass(records) {
             restartAnalysis()
         }
     }
@@ -314,6 +347,11 @@ final class AppModel {
             }.value
             for (identifier, size) in measured {
                 fileSizes["photos:\(identifier)"] = size
+            }
+            // Unmeasurable ones count as zero rather than being looked
+            // up again on every rescan.
+            for identifier in missing where measured[identifier] == nil {
+                fileSizes["photos:\(identifier)"] = 0
             }
         }
         videoSizesReady = true

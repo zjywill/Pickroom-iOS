@@ -10,7 +10,8 @@ struct InspectView: View {
     let assetKey: String
     var showsClose = true
 
-    @State private var image: UIImage?
+    @State private var display = DisplayImageState()
+    private var image: UIImage? { display.image }
     @State private var scale: CGFloat = 1
     @State private var lastScale: CGFloat = 1
     @State private var offset: CGSize = .zero
@@ -85,9 +86,62 @@ struct InspectView: View {
                     .padding(.top, 8)
             }
         }
-        .task {
-            let identifier = String(assetKey.dropFirst("photos:".count))
-            image = await model.imageProvider.cardImage(for: identifier)
+        .overlay(alignment: .bottom) {
+            ICloudBadge(state: display)
+                .padding(.bottom, 180)
         }
+        .task(id: assetKey) {
+            let identifier = String(assetKey.dropFirst("photos:".count))
+            for await update in model.imageProvider.displayImage(for: identifier) {
+                display.apply(update)
+            }
+        }
+    }
+}
+
+/// A photo on screen, arriving: local first, then from iCloud when the
+/// phone only keeps a small copy.
+struct DisplayImageState {
+    var image: UIImage?
+    var downloadProgress: Double?
+    var unavailable = false
+
+    mutating func apply(_ update: AssetImageProvider.DisplayUpdate) {
+        switch update {
+        case let .image(image, isFinal):
+            self.image = image
+            if isFinal { downloadProgress = nil }
+        case let .downloading(progress):
+            downloadProgress = progress
+        case .unavailable:
+            downloadProgress = nil
+            unavailable = true
+        }
+    }
+}
+
+/// "Downloading from iCloud 40%" while a display copy is fetched, or
+/// why only a small copy is showing.
+struct ICloudBadge: View {
+    let state: DisplayImageState
+
+    var body: some View {
+        Group {
+            if let progress = state.downloadProgress {
+                Label(
+                    "Downloading from iCloud \(progress.formatted(.percent.precision(.fractionLength(0))))",
+                    systemImage: "icloud.and.arrow.down"
+                )
+            } else if state.unavailable {
+                Label("In iCloud — couldn't download it now", systemImage: "icloud.slash")
+            }
+        }
+        .font(.caption.weight(.bold))
+        .foregroundStyle(.white)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(Capsule().fill(Camp.ink.opacity(0.7)))
+        .opacity(state.downloadProgress != nil || state.unavailable ? 1 : 0)
+        .monospacedDigit()
     }
 }

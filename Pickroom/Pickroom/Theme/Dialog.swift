@@ -7,7 +7,11 @@ struct CampDialogAction: Identifiable {
         case primary, destructive, cancel
     }
 
-    let id = UUID()
+    /// Stable across re-renders: the actions are rebuilt every time the
+    /// presenting view's body runs, and a fresh identity each time would
+    /// replace the buttons mid-tap — the dialog could not be dismissed
+    /// while analysis progress was redrawing Home.
+    var id: String { title }
     let title: String
     var role: Role = .primary
     var action: () -> Void = {}
@@ -81,6 +85,7 @@ private struct CampDialogView: View {
     let close: () -> Void
 
     @State private var shown = false
+    @State private var closing = false
 
     var body: some View {
         ZStack {
@@ -148,6 +153,8 @@ private struct CampDialogView: View {
     }
 
     private func run(_ action: CampDialogAction) {
+        guard !closing else { return }
+        closing = true
         withAnimation(.easeIn(duration: 0.15)) {
             shown = false
         } completion: {

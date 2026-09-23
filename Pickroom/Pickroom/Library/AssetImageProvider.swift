@@ -8,11 +8,11 @@ import PickroomCore
 /// `PHCachingImageManager`, with a sliding prefetch window around the
 /// deck position.
 ///
-/// The no-network contract is absolute: `isNetworkAccessAllowed` is
-/// `false` on every request this type issues. Grouping, scoring and the
-/// deck all work from local renditions; an iCloud-only asset that has
-/// no local rendition reports that fact (`nil` + degraded) instead of
-/// reaching for the network.
+/// Analysis never touches the network: grouping and scoring work from
+/// local renditions, and an iCloud-only asset is scored from the small
+/// thumbnail Optimise Storage keeps on the phone. The one exception is
+/// `displayImage(for:)` — a photo the user opened to look at, whose
+/// display-sized rendition is fetched from iCloud when it isn't here.
 actor AssetImageProvider {
     static let analysisTargetSize = CGSize(width: 256, height: 256)
     static let cardTargetSize = CGSize(width: 900, height: 1200)
@@ -96,16 +96,14 @@ actor AssetImageProvider {
         else { return nil }
         let options = Self.imageOptions(allowSynchronous: false)
         options.resizeMode = .fast
-        let image: UIImage? = await withCheckedContinuation { continuation in
-            manager.requestImage(
-                for: asset,
-                targetSize: Self.thumbnailTargetSize,
-                contentMode: .aspectFill,
-                options: options
-            ) { result, _ in
-                continuation.resume(returning: result)
-            }
-        }
+        let image = await Self.request(
+            asset,
+            manager: manager,
+            targetSize: Self.thumbnailTargetSize,
+            contentMode: .aspectFill,
+            options: options,
+            acceptDegraded: false
+        )
         if let image {
             thumbnails[identifier] = image
             thumbnailOrder.append(identifier)
@@ -128,23 +126,14 @@ actor AssetImageProvider {
             ).firstObject
         else { return nil }
 
-        let image: UIImage? = await withCheckedContinuation { continuation in
-            manager.requestImage(
-                for: asset,
-                targetSize: Self.cardTargetSize,
-                contentMode: .aspectFit,
-                options: Self.imageOptions(allowSynchronous: false)
-            ) { result, info in
-                let degraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
-                if degraded { return } // wait for the full rendition
-                let cancelled = (info?[PHImageCancelledKey] as? Bool) ?? false
-                if cancelled {
-                    continuation.resume(returning: nil)
-                } else {
-                    continuation.resume(returning: result)
-                }
-            }
-        }
+        let image = await Self.request(
+            asset,
+            manager: manager,
+            targetSize: Self.cardTargetSize,
+            contentMode: .aspectFit,
+            options: Self.imageOptions(allowSynchronous: false),
+            acceptDegraded: false
+        )
         if let image {
             storeInCache(key: identifier, image: image)
         }
@@ -159,17 +148,150 @@ actor AssetImageProvider {
                 options: nil
             ).firstObject
         else { return nil }
-        return await withCheckedContinuation { continuation in
-            manager.requestImage(
-                for: asset,
-                targetSize: Self.analysisTargetSize,
-                contentMode: .aspectFit,
-                options: Self.imageOptions(allowSynchronous: false)
-            ) { result, info in
-                let degraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
-                if degraded { return }
-                continuation.resume(returning: result?.cgImage)
+        // Opportunistic: when the original is in iCloud the final
+        // delivery is empty, and the local thumbnail delivered first is
+        // scored instead (as a stand-in) — no network, and no photo left
+        // unanalysed to be retried on every rescan.
+        let options = Self.imageOptions(allowSynchronous: false)
+        options.deliveryMode = .opportunistic
+        return await Self.request(
+            asset,
+            manager: manager,
+            targetSize: Self.analysisTargetSize,
+            contentMode: .aspectFit,
+            options: options,
+            acceptDegraded: true
+        )?.cgImage
+    }
+
+    // MARK: - Display (the user is looking)
+
+    enum DisplayUpdate: Sendable {
+        case image(UIImage, isFinal: Bool)
+        /// Fetching the display rendition from iCloud, 0…1.
+        case downloading(Double)
+        /// Neither on the device nor reachable (offline, iCloud error).
+        case unavailable
+    }
+
+    /// A photo the user opened: the local card rendition when the phone
+    /// has one; otherwise whatever small copy is local first, then a
+    /// display-sized rendition from iCloud (not the original, and
+    /// nothing is added to the library). Only ever called for a photo on
+    /// screen — analysis stays offline.
+    nonisolated func displayImage(for identifier: String) -> AsyncStream<DisplayUpdate> {
+        AsyncStream { continuation in
+            let work = Task {
+                if let local = await cardImage(for: identifier), Self.isDisplaySized(local) {
+                    continuation.yield(.image(local, isFinal: true))
+                    continuation.finish()
+                    return
+                }
+                guard !Task.isCancelled else { return }
+                await requestFromICloud(identifier, into: continuation)
             }
+            continuation.onTermination = { _ in work.cancel() }
+        }
+    }
+
+    private func requestFromICloud(
+        _ identifier: String,
+        into continuation: AsyncStream<DisplayUpdate>.Continuation
+    ) {
+        guard
+            let asset = PHAsset.fetchAssets(withLocalIdentifiers: [identifier], options: nil).firstObject
+        else {
+            continuation.yield(.unavailable)
+            continuation.finish()
+            return
+        }
+        let requestID = Self.startICloudRequest(asset, manager: manager, continuation: continuation) {
+            [weak self] image in
+            Task { await self?.storeInCache(key: identifier, image: image) }
+        }
+        let manager = manager
+        let previous = continuation.onTermination
+        continuation.onTermination = { reason in
+            previous?(reason)
+            manager.cancelImageRequest(requestID)
+        }
+    }
+
+    /// Built outside the actor: PhotoKit calls the handlers on its own
+    /// queues, and a closure formed in actor context would trap there.
+    nonisolated private static func startICloudRequest(
+        _ asset: PHAsset,
+        manager: PHImageManager,
+        continuation: AsyncStream<DisplayUpdate>.Continuation,
+        onFinal: @escaping @Sendable (UIImage) -> Void
+    ) -> PHImageRequestID {
+        let options = PHImageRequestOptions()
+        options.isNetworkAccessAllowed = true
+        options.deliveryMode = .opportunistic
+        options.resizeMode = .fast
+        options.progressHandler = { progress, error, _, _ in
+            if error == nil { continuation.yield(.downloading(progress)) }
+        }
+        return manager.requestImage(
+            for: asset,
+            targetSize: cardTargetSize,
+            contentMode: .aspectFit,
+            options: options
+        ) { result, info in
+            let degraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
+            if let result {
+                continuation.yield(.image(result, isFinal: !degraded))
+            }
+            guard !degraded else { return }
+            if let result {
+                onFinal(result)
+            } else if (info?[PHImageCancelledKey] as? Bool) != true {
+                continuation.yield(.unavailable)
+            }
+            continuation.finish()
+        }
+    }
+
+    /// Whether a local rendition is big enough to judge a photo by, as
+    /// opposed to the small thumbnail kept for an evicted original.
+    nonisolated static func isDisplaySized(_ image: UIImage) -> Bool {
+        let longest = max(image.size.width, image.size.height) * image.scale
+        return longest >= 600
+    }
+
+    /// One image request as an async call, cancelled with the calling
+    /// task — a grid scrolled past stops asking PhotoKit for its cells.
+    /// With `acceptDegraded`, an empty final delivery falls back to the
+    /// degraded image delivered before it.
+    nonisolated private static func request(
+        _ asset: PHAsset,
+        manager: PHImageManager,
+        targetSize: CGSize,
+        contentMode: PHImageContentMode,
+        options: PHImageRequestOptions,
+        acceptDegraded: Bool
+    ) async -> UIImage? {
+        let state = RequestState()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<UIImage?, Never>) in
+                let requestID = manager.requestImage(
+                    for: asset,
+                    targetSize: targetSize,
+                    contentMode: contentMode,
+                    options: options
+                ) { result, info in
+                    let degraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
+                    if degraded {
+                        if acceptDegraded, let result { state.fallback = result }
+                        return
+                    }
+                    state.resume(continuation, with: result ?? (acceptDegraded ? state.fallback : nil))
+                }
+                state.requestID = requestID
+                if Task.isCancelled { manager.cancelImageRequest(requestID) }
+            }
+        } onCancel: {
+            if let id = state.requestID { manager.cancelImageRequest(id) }
         }
     }
 
@@ -213,6 +335,34 @@ actor AssetImageProvider {
         options.deliveryMode = .highQualityFormat
         options.resizeMode = .exact
         return options
+    }
+}
+
+/// Per-request bookkeeping shared between PhotoKit's handler and the
+/// cancellation handler, which run on different threads.
+private final class RequestState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _requestID: PHImageRequestID?
+    private var _fallback: UIImage?
+    private var resumed = false
+
+    var requestID: PHImageRequestID? {
+        get { lock.withLock { _requestID } }
+        set { lock.withLock { _requestID = newValue } }
+    }
+
+    var fallback: UIImage? {
+        get { lock.withLock { _fallback } }
+        set { lock.withLock { _fallback = newValue } }
+    }
+
+    /// Resumes once: a cancelled request still gets a final callback.
+    func resume(_ continuation: CheckedContinuation<UIImage?, Never>, with image: UIImage?) {
+        let first = lock.withLock {
+            defer { resumed = true }
+            return !resumed
+        }
+        if first { continuation.resume(returning: image) }
     }
 }
 

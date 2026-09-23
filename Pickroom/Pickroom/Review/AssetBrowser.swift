@@ -677,9 +677,9 @@ struct AssetViewer: View {
 }
 
 /// In-app video playback on camp controls — a play button and a
-/// scrubber, no system player chrome. Local renditions only: the
-/// no-network contract covers playback too, so a video that lives only
-/// in iCloud says so and hands off to Photos.
+/// scrubber, no system player chrome. A video whose original is in
+/// iCloud is streamed from there when the user opens it (analysis never
+/// touches the network; watching a video the user chose does).
 struct VideoPlayerView: View {
     @Environment(\.dismiss) private var dismiss
     let assetKey: String
@@ -693,6 +693,7 @@ struct VideoPlayerView: View {
     @State private var duration: Double = 0
     @State private var isScrubbing = false
     @State private var unavailable = false
+    @State private var downloadProgress: Double?
     @State private var timeObserver: Any?
 
     var body: some View {
@@ -703,7 +704,7 @@ struct VideoPlayerView: View {
                         .onTapGesture { togglePlayback() }
                 } else if unavailable {
                     VStack(spacing: 14) {
-                        Text("This video isn't on this device — it lives in iCloud. Pickroom never downloads from the network.")
+                        Text("This video couldn't be loaded. If it's in iCloud, check your connection — or open it in Photos.")
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(Camp.cream)
                             .multilineTextAlignment(.center)
@@ -714,7 +715,15 @@ struct VideoPlayerView: View {
                     }
                     .padding(32)
                 } else {
-                    CampSpinner(color: Camp.cream)
+                    VStack(spacing: 14) {
+                        CampSpinner(color: Camp.cream)
+                        if let downloadProgress {
+                            Text("Downloading from iCloud \(downloadProgress.formatted(.percent.precision(.fractionLength(0))))")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(Camp.cream)
+                                .monospacedDigit()
+                        }
+                    }
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -729,7 +738,12 @@ struct VideoPlayerView: View {
         .overlay(alignment: .bottom) {
             if player != nil { controls }
         }
-        .task { await load() }
+        // Only the page on screen loads: a neighbour in the pager must
+        // not start pulling its video from iCloud.
+        .task(id: isCurrent) {
+            guard isCurrent, player == nil, !unavailable else { return }
+            await load()
+        }
         .onChange(of: isCurrent) { _, current in
             if !current, isPlaying {
                 player?.pause()
@@ -793,12 +807,17 @@ struct VideoPlayerView: View {
         let identifier = String(assetKey.dropFirst("photos:".count))
         guard
             let asset = PHAsset.fetchAssets(withLocalIdentifiers: [identifier], options: nil).firstObject,
-            let url = await Self.localVideoURL(for: asset)
+            let item = await Self.playerItem(for: asset, progress: { progress in
+                Task { @MainActor in downloadProgress = progress }
+            })?.item
         else {
             unavailable = true
             return
         }
-        let player = AVPlayer(url: url)
+        downloadProgress = nil
+        // Play through the silent switch, like Photos does.
+        try? AVAudioSession.sharedInstance().setCategory(.playback)
+        let player = AVPlayer(playerItem: item)
         duration = asset.duration
         timeObserver = player.addPeriodicTimeObserver(
             forInterval: CMTime(seconds: 0.1, preferredTimescale: 600),
@@ -817,18 +836,34 @@ struct VideoPlayerView: View {
         }
     }
 
-    /// The local file behind the video, never a network download.
-    /// `nonisolated` so the PhotoKit callback isn't main-actor bound —
-    /// PhotoKit calls it on its own queue.
-    nonisolated private static func localVideoURL(for asset: PHAsset) async -> URL? {
+    /// A player item for the video — the local file, or streamed from
+    /// iCloud when the original isn't on the phone. A player item (not a
+    /// file URL) also covers slow-motion and edited videos, which
+    /// PhotoKit hands back as compositions. `nonisolated` so the
+    /// PhotoKit callbacks aren't main-actor bound — PhotoKit calls them
+    /// on its own queue.
+    nonisolated private static func playerItem(
+        for asset: PHAsset,
+        progress: @escaping @Sendable (Double) -> Void
+    ) async -> LoadedItem? {
         let options = PHVideoRequestOptions()
-        options.isNetworkAccessAllowed = false
+        options.isNetworkAccessAllowed = true
         options.deliveryMode = .automatic
+        options.version = .current
+        options.progressHandler = { value, error, _, _ in
+            if error == nil { progress(value) }
+        }
         return await withCheckedContinuation { continuation in
-            PHImageManager.default().requestAVAsset(forVideo: asset, options: options) { avAsset, _, _ in
-                continuation.resume(returning: (avAsset as? AVURLAsset)?.url)
+            PHImageManager.default().requestPlayerItem(forVideo: asset, options: options) { item, _ in
+                continuation.resume(returning: item.map(LoadedItem.init))
             }
         }
+    }
+
+    /// Hands the item from PhotoKit's queue to the main actor, which is
+    /// the only place it is used afterwards.
+    private struct LoadedItem: @unchecked Sendable {
+        let item: AVPlayerItem
     }
 }
 

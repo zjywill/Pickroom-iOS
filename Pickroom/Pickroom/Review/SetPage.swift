@@ -201,7 +201,8 @@ private struct BestShotCard: View {
     let movesOn: Bool
     let onKeepOnly: () -> Void
 
-    @State private var image: UIImage?
+    @State private var display = DisplayImageState()
+    private var image: UIImage? { display.image }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -224,6 +225,9 @@ private struct BestShotCard: View {
                         .padding(.vertical, 5)
                         .background(Capsule().fill(Camp.keep))
                         .padding(10)
+                }
+                .overlay(alignment: .bottomTrailing) {
+                    ICloudBadge(state: display).padding(10)
                 }
                 .overlay(alignment: .bottomLeading) {
                     if let date {
@@ -254,8 +258,11 @@ private struct BestShotCard: View {
         }
         .campPanel(padding: 12)
         .task(id: assetKey) {
+            display = DisplayImageState()
             let identifier = String(assetKey.dropFirst("photos:".count))
-            image = await model.imageProvider.cardImage(for: identifier)
+            for await update in model.imageProvider.displayImage(for: identifier) {
+                display.apply(update)
+            }
         }
     }
 }

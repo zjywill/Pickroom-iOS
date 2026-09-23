@@ -98,6 +98,7 @@ public struct FingerprintCache: Sendable {
             data.appendLE(Int32(entry.fingerprint.revision))
             data.appendPrefixedString(entry.fingerprint.cropAndScaleOption)
             data.appendLE(UInt32(entry.fingerprint.vector.count))
+            data.reserveCapacity(data.count + entry.fingerprint.vector.count * 4)
             for value in entry.fingerprint.vector {
                 data.appendLE(value.bitPattern)
             }
@@ -183,20 +184,25 @@ public struct BinaryReader {
         return bytes
     }
 
+    /// Reads without allocating: a fingerprint table is millions of
+    /// these, and an array per value made loading take seconds.
     public mutating func readUInt32() -> UInt32? {
-        guard let bytes = readBytes(4), bytes.count == 4 else { return nil }
-        return UInt32(bytes[0])
-            | (UInt32(bytes[1]) << 8)
-            | (UInt32(bytes[2]) << 16)
-            | (UInt32(bytes[3]) << 24)
+        readInteger(UInt32.self)
     }
 
     public mutating func readUInt64() -> UInt64? {
-        var value: UInt64 = 0
-        guard let bytes = readBytes(8) else { return nil }
-        for (i, byte) in bytes.enumerated() {
-            value |= UInt64(byte) << (8 * i)
+        readInteger(UInt64.self)
+    }
+
+    private mutating func readInteger<T: FixedWidthInteger>(_: T.Type) -> T? {
+        let size = MemoryLayout<T>.size
+        guard remaining >= size else { return nil }
+        let start = data.startIndex + offset
+        var value: T = 0
+        for i in 0..<size {
+            value |= T(data[start + i]) << (8 * i)
         }
+        offset += size
         return value
     }
 
@@ -217,23 +223,23 @@ public struct BinaryReader {
 
 extension Data {
     public mutating func appendLE(_ value: UInt32) {
-        append(contentsOf: leBytes(value))
+        appendLE(integer: value)
     }
 
     public mutating func appendLE(_ value: UInt64) {
-        append(contentsOf: leBytes(value))
+        appendLE(integer: value)
     }
 
     public mutating func appendLE(_ value: Int32) {
-        append(contentsOf: leBytes(UInt32(bitPattern: value)))
+        appendLE(integer: UInt32(bitPattern: value))
     }
 
     public mutating func appendLE(_ value: Double) {
-        append(contentsOf: leBytes(value.bitPattern))
+        appendLE(integer: value.bitPattern)
     }
 
     public mutating func appendLE(_ value: Float) {
-        append(contentsOf: leBytes(value.bitPattern))
+        appendLE(integer: value.bitPattern)
     }
 
     public mutating func appendPrefixedString(_ string: String) {
@@ -242,11 +248,9 @@ extension Data {
         append(contentsOf: bytes)
     }
 
-    private func leBytes<T: FixedWidthInteger>(_ value: T) -> [UInt8] {
-        let le = value.littleEndian
-        let size = MemoryLayout<T>.size
-        return Swift.withUnsafeBytes(of: le) { raw in
-            Array(raw.prefix(size))
+    private mutating func appendLE<T: FixedWidthInteger>(integer value: T) {
+        Swift.withUnsafeBytes(of: value.littleEndian) { raw in
+            append(contentsOf: raw)
         }
     }
 }

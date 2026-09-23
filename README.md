@@ -115,7 +115,12 @@ Release gates, checked:
 - One delete path only, through `performChanges` → the system's own
   confirmation for the entire batch.
 - Nothing anywhere empties Recently Deleted.
-- Every image request has `isNetworkAccessAllowed = false`.
+- Analysis never uses the network: every analysis, thumbnail and metadata
+  request has `isNetworkAccessAllowed = false`, and an iCloud-only photo is
+  scored from its local thumbnail. The only network requests are the two a
+  user starts by opening an item — a display-sized photo
+  (`AssetImageProvider.displayImage`) and video playback — and both go into
+  Photos' own purgeable cache, never the library.
 - `.iTunesSynced` / `.cloudShared` assets are filtered at three layers.
 - No bulk action exists for `probablyBad`, at any threshold.
 
