@@ -2,9 +2,9 @@ import SwiftUI
 import Photos
 import PickroomCore
 
-/// Triage: one set at a time, laid out for a decision — best shot on
-/// top, the rest ranked below, tap to mark — then "Next set". No
-/// confirmation dialogs during triage; safety comes from Back (undo)
+/// Triage: one set at a time, one photo at a time — swipe left to
+/// toss, right to keep; the set's last photo brings up the next set.
+/// No confirmation dialogs during triage; safety comes from Back (undo)
 /// and from nothing leaving the library until an explicit commit.
 struct DeckView: View {
     @Environment(AppModel.self) private var model
@@ -74,55 +74,21 @@ struct DeckView: View {
             try? await Task.sleep(for: .seconds(6))
             if !Task.isCancelled { deletedBanner = nil }
         }
-        // Hardware keyboard (iPad): the same four decisions, same
-        // rhythm, without the thumb. Phase 5 parity with the Mac app's
-        // keyboard-first heritage.
-        .background { hardwareKeyboardShortcuts }
-    }
-
-    @ViewBuilder
-    private var hardwareKeyboardShortcuts: some View {
-        Group {
-            Button("Next set") { deck.resolveCurrent() }
-                .keyboardShortcut(.rightArrow, modifiers: [])
-            Button("Later") { deck.decideLater() }
-                .keyboardShortcut(.upArrow, modifiers: [])
-            Button("Back") { deck.undo() }
-                .keyboardShortcut(.leftArrow, modifiers: [])
-                .disabled(!deck.canUndo)
-            Button("Undo") { deck.undo() }
-                .keyboardShortcut("z", modifiers: .command)
-                .disabled(!deck.canUndo)
-        }
-        .frame(width: 0, height: 0)
-        .opacity(0)
-        .accessibilityHidden(true)
     }
 
     // MARK: - Set page
 
     @ViewBuilder
     private func setStack(_ card: CardModel) -> some View {
-        VStack(spacing: 0) {
-            SetPage(group: card.group, mode: .deckCard, onDecided: { _ in deck.resolveCurrent() }) {
-                Button {
-                    confirmingIgnore = true
-                } label: {
-                    Label("Ignore this set for good", systemImage: "eye.slash")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.campPlain)
-            }
-            // A fresh page per set: its order and "Kept" labels start
-            // from this set's marks.
-            .id(card.id)
-            .transition(.asymmetric(
-                insertion: .move(edge: .trailing).combined(with: .opacity),
-                removal: .move(edge: .leading).combined(with: .opacity)
-            ))
-
-            actionBar(card)
+        MemberSwipeView(deck: deck, card: card) {
+            confirmingIgnore = true
         }
+        // A fresh page per set: the walk starts at this set's first photo.
+        .id(card.id)
+        .transition(.asymmetric(
+            insertion: .move(edge: .trailing).combined(with: .opacity),
+            removal: .move(edge: .leading).combined(with: .opacity)
+        ))
         .animation(.snappy, value: card.id)
         .campDialog(
             isPresented: $confirmingIgnore,
@@ -137,64 +103,10 @@ struct DeckView: View {
         )
         .task(id: card.id) {
             prefetchWindow()
-            // Suggestion + the keep-one default for this set.
+            // The keeper leads the walk; rank before the first swipe.
             await deck.rankCurrentCard()
         }
         .shakeToUndo(deck: deck)
-    }
-
-    /// Back · Later · Next. "Next" names what it does with the marks on
-    /// screen, so the decision is never a surprise.
-    private func actionBar(_ card: CardModel) -> some View {
-        let marked = card.markedKeys.filter { model.deck?.decisions[$0] != .pick }.count
-        return HStack(spacing: 10) {
-            Button {
-                deck.undo()
-            } label: {
-                Image(systemName: "arrow.uturn.backward")
-            }
-            .buttonStyle(RoundChunkyButtonStyle(fill: Camp.wood, edge: Camp.woodEdge, size: 48))
-            .disabled(!deck.canUndo)
-            .accessibilityLabel("Back to the previous set")
-
-            Button {
-                deck.decideLater()
-            } label: {
-                Label("Later", systemImage: "clock.arrow.circlepath")
-                    .lineLimit(1)
-            }
-            .buttonStyle(ChunkyButtonStyle(
-                fill: Camp.later,
-                edge: Camp.laterEdge,
-                foreground: Camp.laterInk,
-                horizontalPadding: 14,
-                verticalPadding: 13
-            ))
-            .fixedSize()
-
-            Button {
-                deck.resolveCurrent()
-            } label: {
-                HStack(spacing: 6) {
-                    Text(marked > 0 ? "Toss \(marked) · Next" : "Keep all · Next")
-                    Image(systemName: "chevron.right")
-                }
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
-                .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(marked > 0
-                ? ChunkyButtonStyle(fill: Camp.toss, edge: Camp.tossEdge, verticalPadding: 13)
-                : ChunkyButtonStyle(fill: Camp.keep, edge: Camp.keepEdge, verticalPadding: 13))
-            .accessibilityLabel(marked > 0 ? "Toss \(marked) and go to the next set" : "Keep all and go to the next set")
-        }
-        .padding(.horizontal, 16)
-        .padding(.top, 10)
-        .padding(.bottom, 8)
-        .background(
-            Camp.paper
-                .shadow(color: Camp.panelEdge.opacity(0.6), radius: 0, x: 0, y: -2)
-        )
     }
 
     /// Clears every decision and runs the deck again from the top.

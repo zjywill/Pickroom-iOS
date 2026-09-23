@@ -233,6 +233,8 @@ extension EnvironmentValues {
     /// Height of the floating camp tab bar, so screens can keep their
     /// content clear of it. Zero where there is no tab bar.
     @Entry var campTabBarInset: CGFloat = 0
+    /// Switches the root tab (Home's "Start sorting" → Triage).
+    @Entry var selectRootTab: (RootTab) -> Void = { _ in }
 }
 
 extension View {
