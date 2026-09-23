@@ -10,9 +10,10 @@ import PickroomCore
 ///
 /// Analysis never touches the network: grouping and scoring work from
 /// local renditions, and an iCloud-only asset is scored from the small
-/// thumbnail Optimise Storage keeps on the phone. The one exception is
-/// `displayImage(for:)` — a photo the user opened to look at, whose
-/// display-sized rendition is fetched from iCloud when it isn't here.
+/// thumbnail Optimise Storage keeps on the phone. The exceptions are
+/// what's on screen: `displayImage(for:)` — a photo the user opened to
+/// look at, whose display-sized rendition is fetched from iCloud when it
+/// isn't here — and a grid `thumbnail(for:)` with no local copy at all.
 actor AssetImageProvider {
     static let analysisTargetSize = CGSize(width: 256, height: 256)
     static let cardTargetSize = CGSize(width: 900, height: 1200)
@@ -94,16 +95,37 @@ actor AssetImageProvider {
                 options: nil
             ).firstObject
         else { return nil }
+        // Opportunistic: for an iCloud-only original a high-quality local
+        // request delivers nothing, but the small thumbnail Optimise
+        // Storage keeps arrives first as the degraded image — use it.
         let options = Self.imageOptions(allowSynchronous: false)
+        options.deliveryMode = .opportunistic
         options.resizeMode = .fast
-        let image = await Self.request(
+        var image = await Self.request(
             asset,
             manager: manager,
             targetSize: Self.thumbnailTargetSize,
             contentMode: .aspectFill,
             options: options,
-            acceptDegraded: false
+            acceptDegraded: true
         )
+        // Nothing local at all: the cell is on screen, so fetch a small
+        // rendition from iCloud. Cancelled with the cell's task when it
+        // scrolls away.
+        if image == nil, !Task.isCancelled {
+            let network = Self.imageOptions(allowSynchronous: false)
+            network.isNetworkAccessAllowed = true
+            network.deliveryMode = .opportunistic
+            network.resizeMode = .fast
+            image = await Self.request(
+                asset,
+                manager: manager,
+                targetSize: Self.thumbnailTargetSize,
+                contentMode: .aspectFill,
+                options: network,
+                acceptDegraded: true
+            )
+        }
         if let image {
             thumbnails[identifier] = image
             thumbnailOrder.append(identifier)
