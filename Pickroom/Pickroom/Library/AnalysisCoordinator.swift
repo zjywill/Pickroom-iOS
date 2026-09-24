@@ -54,7 +54,9 @@ final class PowerGate {
 ///
 /// - Stage A′: quality (failed-frame tiers, aesthetics, face capture)
 ///   over a 256 px rendition of every image — and the exact-duplicate
-///   hash from that same rendition, so no second pass.
+///   hash from that same rendition, so no second pass. Only assets
+///   whose rendition hashes collide have their originals' bytes read
+///   to prove the duplicate (`verifyExactDuplicates`).
 /// - Candidate metadata: adjustment data and EXIF exposure bias, only
 ///   for the near-duplicate and bracket candidates the guards affect.
 /// - Stage B: feature prints for near-duplicate candidates only, cached
@@ -106,15 +108,15 @@ final class AnalysisCoordinator {
         self.storageDirectory = storageDirectory ?? Self.defaultStorageDirectory()
     }
 
-    /// v2: builds up to 1.0 (6) cached prints taken from iCloud stand-in
-    /// thumbnails, which cannot be told apart from real ones, so the old
-    /// file is dropped and every print recomputed once.
+    /// v3: builds up to 1.0 (7) could cache prints taken from iCloud
+    /// stand-in thumbnails, which cannot be told apart from real ones,
+    /// so older files are dropped and every print recomputed once.
     private var fingerprintCacheURL: URL {
-        storageDirectory.appendingPathComponent("fingerprints-v2.bin")
+        storageDirectory.appendingPathComponent("fingerprints-v3.bin")
     }
 
-    private var legacyFingerprintCacheURL: URL {
-        storageDirectory.appendingPathComponent("fingerprints.bin")
+    private var legacyFingerprintCacheURLs: [URL] {
+        ["fingerprints.bin", "fingerprints-v2.bin"].map(storageDirectory.appendingPathComponent)
     }
 
     private var metadataCacheURL: URL {
@@ -124,9 +126,9 @@ final class AnalysisCoordinator {
     private func loadedFingerprintCache() async -> FingerprintCache {
         if let fingerprintCache { return fingerprintCache }
         let url = fingerprintCacheURL
-        let legacyURL = legacyFingerprintCacheURL
+        let legacyURLs = legacyFingerprintCacheURLs
         let loaded = await Task.detached(priority: .utility) {
-            try? FileManager.default.removeItem(at: legacyURL)
+            for legacy in legacyURLs { try? FileManager.default.removeItem(at: legacy) }
             return FingerprintCache.load(from: url, parameters: VisionFingerprinter.parameters)
         }.value
         // Another stage may have loaded it while this one waited.
@@ -218,12 +220,12 @@ final class AnalysisCoordinator {
                 unrenderableKeys.insert(record.key)
             }
             if let rendition {
-                let result = await analyzer.analyzeFull(image: rendition)
+                let result = await analyzer.analyzeFull(image: rendition.image)
                 updated[position].quality = result.quality
                 updated[position].aestheticsScore = result.aestheticsScore
                 updated[position].isUtility = result.isUtility
                 updated[position].faceCaptureQuality = result.faceCaptureQuality
-                updated[position].scoredFromStandIn = AssetImageProvider.isStandIn(rendition)
+                updated[position].scoredFromStandIn = rendition.isStandIn
                 // A stand-in is a tiny, heavily compressed thumbnail:
                 // different shots of the same scene at the same pixel
                 // size decode to identical pixels, so its hash would
@@ -235,7 +237,7 @@ final class AnalysisCoordinator {
                     let hasher = hasher
                     updated[position].contentHash = await Task.detached(priority: .utility) {
                         hasher.hash(
-                            image: rendition,
+                            image: rendition.image,
                             pixelWidth: record.pixelWidth,
                             pixelHeight: record.pixelHeight
                         )
@@ -394,6 +396,50 @@ final class AnalysisCoordinator {
         return keys
     }
 
+    // MARK: - Exact-duplicate proof
+
+    /// Rendition hashes only nominate exact duplicates. For every image
+    /// whose `contentHash` is shared with another, this reads the
+    /// original files' bytes (local only) into `originalHash`, which is
+    /// what the engine groups on. Typically a handful of assets; cached
+    /// per key and modification date.
+    func verifyExactDuplicates(records: [AssetRecord]) async -> [AssetRecord] {
+        var byHash: [Data: [Int]] = [:]
+        for index in records.indices where records[index].mediaType == .image {
+            guard let hash = records[index].contentHash else { continue }
+            byHash[hash, default: []].append(index)
+        }
+        let targets = byHash.values.filter { $0.count > 1 }.flatMap { $0 }
+        guard !targets.isEmpty else { return records }
+
+        var updated = records
+        var changed = false
+        var metadataCache = await loadedMetadataCache()
+        defer {
+            self.metadataCache = metadataCache
+            if changed { persistMetadataCache() }
+        }
+        for position in targets {
+            guard await waitWhilePaused("Paused — device is hot or in Low Power Mode") else { break }
+            let record = records[position]
+            var entry = metadataCache.entry(for: record) ?? .init()
+            if entry.originalHashChecked != true {
+                let identifier = Self.identifier(record)
+                entry.originalHash = await Task.detached(priority: .utility) {
+                    await PhotoKitLibrary.originalHash(identifier: identifier)
+                }.value
+                if entry.originalHash != nil {
+                    entry.originalHashChecked = true
+                    metadataCache.set(entry, for: record)
+                    changed = true
+                }
+            }
+            updated[position].originalHash = entry.originalHash
+            await Task.yield()
+        }
+        return updated
+    }
+
     // MARK: - Stage B (fingerprints)
 
     /// Fingerprints the near-duplicate candidate set and returns
@@ -442,12 +488,12 @@ final class AnalysisCoordinator {
                 continue
             }
             do {
-                let print = try await fingerprinter.fingerprint(for: rendition)
+                let print = try await fingerprinter.fingerprint(for: rendition.image)
                 // A print from a stand-in (iCloud-only) thumbnail serves
                 // this session but is not saved: once the photo is on
                 // the phone its modification date doesn't change, so a
                 // cached stand-in print would never be replaced.
-                if !AssetImageProvider.isStandIn(rendition) {
+                if !rendition.isStandIn {
                     fingerprintCache?.upsert(
                         .init(
                             key: record.key,
@@ -604,6 +650,10 @@ struct CandidateMetadataCache: Sendable {
         var hasAdjustments: Bool?
         var exposureBias: Double?
         var exposureBiasChecked: Bool?
+        var originalHash: Data?
+        /// Set once the originals were read; an iCloud-only original
+        /// leaves it unset so the proof is retried once it is local.
+        var originalHashChecked: Bool?
     }
 
     private var entries: [String: Entry] = [:]

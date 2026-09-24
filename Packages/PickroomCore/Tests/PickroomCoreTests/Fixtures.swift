@@ -30,6 +30,7 @@ enum Fixtures {
         aestheticsScore: Double? = nil,
         fingerprint: Fingerprint? = nil,
         contentHash: Data? = nil,
+        originalHash: Data? = nil,
         fileName: String? = nil
     ) -> AssetRecord {
         AssetRecord(
@@ -55,7 +56,10 @@ enum Fixtures {
             isUtility: isUtility,
             faceCaptureQuality: faceCaptureQuality,
             fingerprint: fingerprint,
-            contentHash: contentHash
+            contentHash: contentHash,
+            // A fixture's shared content hash stands for proven copies
+            // unless a test says otherwise.
+            originalHash: originalHash ?? contentHash
         )
     }
 

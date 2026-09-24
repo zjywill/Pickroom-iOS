@@ -1,6 +1,7 @@
 import Foundation
 import Photos
 import ImageIO
+import CryptoKit
 import PickroomCore
 
 /// The app-level access state, mapping `PHAuthorizationStatus` onto the
@@ -122,6 +123,46 @@ actor PhotoKitLibrary {
         }
     }
 
+    // MARK: - Exact-duplicate proof
+
+    /// SHA-256 over the bytes of the asset's photo resources — the
+    /// original plus, when present, the edited full-size render and a
+    /// RAW+JPEG pair's alternate — in a fixed order. Equal values mean
+    /// byte-identical files. Read only for assets whose analysis
+    /// renditions already hash equal, and never over the network: an
+    /// original that is only in iCloud reports `nil`, and an unproven
+    /// pair is never called an exact duplicate.
+    nonisolated static func originalHash(identifier: String) async -> Data? {
+        guard
+            let asset = PHAsset.fetchAssets(
+                withLocalIdentifiers: [identifier],
+                options: nil
+            ).firstObject
+        else { return nil }
+        let photoTypes: [PHAssetResourceType] = [.photo, .fullSizePhoto, .alternatePhoto]
+        let resources = PHAssetResource.assetResources(for: asset)
+            .filter { photoTypes.contains($0.type) }
+            .sorted { $0.type.rawValue < $1.type.rawValue }
+        guard resources.contains(where: { $0.type == .photo }) else { return nil }
+
+        let digest = LockedDigest()
+        for resource in resources {
+            digest.update(withUnsafeBytes(of: resource.type.rawValue.littleEndian) { Data($0) })
+            let options = PHAssetResourceRequestOptions()
+            options.isNetworkAccessAllowed = false
+            let succeeded: Bool = await withCheckedContinuation { continuation in
+                PHAssetResourceManager.default().requestData(
+                    for: resource,
+                    options: options,
+                    dataReceivedHandler: { digest.update($0) },
+                    completionHandler: { error in continuation.resume(returning: error == nil) }
+                )
+            }
+            guard succeeded else { return nil }
+        }
+        return digest.finalize()
+    }
+
     // MARK: - Per-candidate metadata
 
     /// Whether the asset carries a Photos edit. A modification date is
@@ -235,5 +276,20 @@ private final class ChangeObserver: NSObject, PHPhotoLibraryChangeObserver {
 
     func photoLibraryDidChange(_ changeInstance: PHChange) {
         handler(changeInstance)
+    }
+}
+
+/// SHA-256 fed from PhotoKit's data callbacks, which arrive on its own
+/// queue.
+private final class LockedDigest: @unchecked Sendable {
+    private let lock = NSLock()
+    private var digest = SHA256()
+
+    func update(_ data: Data) {
+        lock.withLock { digest.update(data: data) }
+    }
+
+    func finalize() -> Data {
+        lock.withLock { Data(digest.finalize()) }
     }
 }

@@ -102,10 +102,17 @@ public struct AssetRecord: Identifiable, Hashable, Sendable {
     /// the network is never reached to score.
     public var scoredFromStandIn: Bool
 
-    /// Content hash over resource bytes (e.g. SHA-256 of the original
-    /// photo resource). Equal hashes across assets mean exact duplicates —
-    /// the one category where time distance is irrelevant.
+    /// Hash of the analysis rendition plus pixel dimensions. Cheap and
+    /// computed for every image, but *not* proof: small renditions of
+    /// different shots can match. Equal values only nominate assets
+    /// for `originalHash`.
     public var contentHash: Data?
+
+    /// SHA-256 over the photo resources' bytes, read only for assets
+    /// whose `contentHash` collides and only when the originals are on
+    /// the device. Equal values mean exact duplicates — the one
+    /// category where time distance is irrelevant.
+    public var originalHash: Data?
 
     public init(
         key: String,
@@ -133,7 +140,8 @@ public struct AssetRecord: Identifiable, Hashable, Sendable {
         faceCaptureQuality: Double? = nil,
         fingerprint: Fingerprint? = nil,
         scoredFromStandIn: Bool = false,
-        contentHash: Data? = nil
+        contentHash: Data? = nil,
+        originalHash: Data? = nil
     ) {
         self.key = key
         self.capturedAt = capturedAt
@@ -161,6 +169,7 @@ public struct AssetRecord: Identifiable, Hashable, Sendable {
         self.fingerprint = fingerprint
         self.scoredFromStandIn = scoredFromStandIn
         self.contentHash = contentHash
+        self.originalHash = originalHash
     }
 
     public var id: String { key }

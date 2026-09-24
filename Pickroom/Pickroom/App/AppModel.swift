@@ -219,8 +219,9 @@ final class AppModel {
     }
 
     /// Quality (with the exact-duplicate hash from the same render),
-    /// then the guards' candidate metadata, then fingerprints for the
-    /// near-duplicate candidates. After each stage the results are
+    /// then byte proof for matching hashes, then the guards' candidate
+    /// metadata, then fingerprints for the near-duplicate candidates.
+    /// After each stage the results are
     /// merged into whatever the records are *now* — the library may
     /// have changed underneath — and the engine re-runs, so the deck
     /// improves incrementally.
@@ -233,6 +234,10 @@ final class AppModel {
         }
         guard !Task.isCancelled else { return }
         await mergeAnalysis(analysed)
+
+        let verified = await analysis.verifyExactDuplicates(records: records)
+        guard !Task.isCancelled else { return }
+        await mergeAnalysis(verified)
 
         let withMetadata = await analysis.readCandidateMetadata(records: records)
         guard !Task.isCancelled else { return }
@@ -293,6 +298,7 @@ final class AppModel {
             merged.faceCaptureQuality = old.faceCaptureQuality ?? record.faceCaptureQuality
             merged.fingerprint = old.fingerprint ?? record.fingerprint
             merged.contentHash = old.contentHash ?? record.contentHash
+            merged.originalHash = old.originalHash ?? record.originalHash
             merged.exposureBias = old.exposureBias ?? record.exposureBias
             merged.isEditedVersion = old.isEditedVersion || record.isEditedVersion
             merged.scoredFromStandIn = old.quality != nil ? old.scoredFromStandIn : record.scoredFromStandIn

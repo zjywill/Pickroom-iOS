@@ -198,7 +198,16 @@ actor AssetImageProvider {
     }
 
     /// Small rendition for pixel analysis (Stage A′).
-    func analysisRendition(for identifier: String) async -> CGImage? {
+    /// A 256 px analysis image and whether it is only a stand-in.
+    struct AnalysisRendition: @unchecked Sendable {
+        let image: CGImage
+        /// The original is in iCloud and PhotoKit could serve only the
+        /// small local thumbnail. Hashes and fingerprints taken from it
+        /// prove nothing and are never cached.
+        let isStandIn: Bool
+    }
+
+    func analysisRendition(for identifier: String) async -> AnalysisRendition? {
         guard
             let asset = PHAsset.fetchAssets(
                 withLocalIdentifiers: [identifier],
@@ -211,14 +220,22 @@ actor AssetImageProvider {
         // unanalysed to be retried on every rescan.
         let options = Self.imageOptions(allowSynchronous: false)
         options.deliveryMode = .opportunistic
-        return await Self.request(
+        let delivery = await Self.requestDelivery(
             asset,
             manager: manager,
             targetSize: Self.analysisTargetSize,
             contentMode: .aspectFit,
             options: options,
             acceptDegraded: true
-        )?.cgImage
+        )
+        guard let image = delivery.image?.cgImage else { return nil }
+        // PhotoKit says so directly (the final delivery was empty and the
+        // degraded thumbnail stood in); the size check is a backstop, as
+        // Optimise Storage thumbnails can be well over half the target.
+        return AnalysisRendition(
+            image: image,
+            isStandIn: delivery.isFallback || Self.isStandIn(image)
+        )
     }
 
     // MARK: - Display (the user is looking)
@@ -328,9 +345,34 @@ actor AssetImageProvider {
         options: PHImageRequestOptions,
         acceptDegraded: Bool
     ) async -> UIImage? {
+        await requestDelivery(
+            asset,
+            manager: manager,
+            targetSize: targetSize,
+            contentMode: contentMode,
+            options: options,
+            acceptDegraded: acceptDegraded
+        ).image
+    }
+
+    struct Delivery: @unchecked Sendable {
+        var image: UIImage?
+        /// The final delivery was empty or reported the original in
+        /// iCloud; `image` is the degraded thumbnail delivered first.
+        var isFallback = false
+    }
+
+    nonisolated private static func requestDelivery(
+        _ asset: PHAsset,
+        manager: PHImageManager,
+        targetSize: CGSize,
+        contentMode: PHImageContentMode,
+        options: PHImageRequestOptions,
+        acceptDegraded: Bool
+    ) async -> Delivery {
         let state = RequestState()
         return await withTaskCancellationHandler {
-            await withCheckedContinuation { (continuation: CheckedContinuation<UIImage?, Never>) in
+            await withCheckedContinuation { (continuation: CheckedContinuation<Delivery, Never>) in
                 let requestID = manager.requestImage(
                     for: asset,
                     targetSize: targetSize,
@@ -342,7 +384,14 @@ actor AssetImageProvider {
                         if acceptDegraded, let result { state.fallback = result }
                         return
                     }
-                    state.resume(continuation, with: result ?? (acceptDegraded ? state.fallback : nil))
+                    let inCloud = (info?[PHImageResultIsInCloudKey] as? Bool) ?? false
+                    if let result {
+                        state.resume(continuation, with: Delivery(image: result, isFallback: inCloud))
+                    } else if acceptDegraded, let fallback = state.fallback {
+                        state.resume(continuation, with: Delivery(image: fallback, isFallback: true))
+                    } else {
+                        state.resume(continuation, with: Delivery(image: nil))
+                    }
                 }
                 state.requestID = requestID
                 if Task.isCancelled { manager.cancelImageRequest(requestID) }
@@ -414,12 +463,12 @@ private final class RequestState: @unchecked Sendable {
     }
 
     /// Resumes once: a cancelled request still gets a final callback.
-    func resume(_ continuation: CheckedContinuation<UIImage?, Never>, with image: UIImage?) {
+    func resume<Value: Sendable>(_ continuation: CheckedContinuation<Value, Never>, with value: Value) {
         let first = lock.withLock {
             defer { resumed = true }
             return !resumed
         }
-        if first { continuation.resume(returning: image) }
+        if first { continuation.resume(returning: value) }
     }
 }
 

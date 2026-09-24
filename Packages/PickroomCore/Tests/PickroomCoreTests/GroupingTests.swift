@@ -36,18 +36,30 @@ final class CrossYearTests: XCTestCase {
         XCTAssertEqual(Set(exact.memberKeys), ["a", "b"])
     }
 
-    func testStandInHashesNeverFormExactDuplicates() {
-        // iCloud-only photos are analysed from a tiny local thumbnail;
-        // similar shots share its pixels, so equal hashes prove nothing.
+    func testMatchingRenditionHashWithoutByteProofIsNotAnExactDuplicate() {
+        // Small renditions of similar shots (or iCloud stand-in
+        // thumbnails) can hash equal; without the originals' bytes that
+        // proves nothing.
         let hash = Data([0x0A, 0x0B])
         var a = Fixtures.asset("a", capturedAt: Fixtures.base, contentHash: hash)
         var b = Fixtures.asset("b", capturedAt: Fixtures.base.addingTimeInterval(2), contentHash: hash)
-        a.scoredFromStandIn = true
-        b.scoredFromStandIn = true
+        a.originalHash = nil
+        b.originalHash = nil
 
         let (groups, summary) = GroupEngine().makeGroups(assets: [a, b])
         XCTAssertTrue(groups.filter { $0.kind == .exactDuplicate }.isEmpty)
         XCTAssertEqual(summary.exactDuplicateCount, 0)
+    }
+
+    func testMatchingRenditionHashWithDifferentBytesIsNotAnExactDuplicate() {
+        let hash = Data([0x0A, 0x0B])
+        let assets = [
+            Fixtures.asset("a", capturedAt: Fixtures.base, contentHash: hash, originalHash: Data([0x01])),
+            Fixtures.asset("b", capturedAt: Fixtures.base.addingTimeInterval(2), contentHash: hash, originalHash: Data([0x02])),
+        ]
+
+        let (groups, _) = GroupEngine().makeGroups(assets: assets)
+        XCTAssertTrue(groups.filter { $0.kind == .exactDuplicate }.isEmpty)
     }
 }
 
