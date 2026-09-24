@@ -106,7 +106,14 @@ final class AnalysisCoordinator {
         self.storageDirectory = storageDirectory ?? Self.defaultStorageDirectory()
     }
 
+    /// v2: builds up to 1.0 (6) cached prints taken from iCloud stand-in
+    /// thumbnails, which cannot be told apart from real ones, so the old
+    /// file is dropped and every print recomputed once.
     private var fingerprintCacheURL: URL {
+        storageDirectory.appendingPathComponent("fingerprints-v2.bin")
+    }
+
+    private var legacyFingerprintCacheURL: URL {
         storageDirectory.appendingPathComponent("fingerprints.bin")
     }
 
@@ -117,8 +124,10 @@ final class AnalysisCoordinator {
     private func loadedFingerprintCache() async -> FingerprintCache {
         if let fingerprintCache { return fingerprintCache }
         let url = fingerprintCacheURL
+        let legacyURL = legacyFingerprintCacheURL
         let loaded = await Task.detached(priority: .utility) {
-            FingerprintCache.load(from: url, parameters: VisionFingerprinter.parameters)
+            try? FileManager.default.removeItem(at: legacyURL)
+            return FingerprintCache.load(from: url, parameters: VisionFingerprinter.parameters)
         }.value
         // Another stage may have loaded it while this one waited.
         if let fingerprintCache { return fingerprintCache }
@@ -434,14 +443,20 @@ final class AnalysisCoordinator {
             }
             do {
                 let print = try await fingerprinter.fingerprint(for: rendition)
-                fingerprintCache?.upsert(
-                    .init(
-                        key: record.key,
-                        modificationDate: record.modificationDate,
-                        fingerprint: print
+                // A print from a stand-in (iCloud-only) thumbnail serves
+                // this session but is not saved: once the photo is on
+                // the phone its modification date doesn't change, so a
+                // cached stand-in print would never be replaced.
+                if !AssetImageProvider.isStandIn(rendition) {
+                    fingerprintCache?.upsert(
+                        .init(
+                            key: record.key,
+                            modificationDate: record.modificationDate,
+                            fingerprint: print
+                        )
                     )
-                )
-                fingerprintCacheDirty = true
+                    fingerprintCacheDirty = true
+                }
                 if let position = byKey[record.key] {
                     updated[position].fingerprint = print
                 }
