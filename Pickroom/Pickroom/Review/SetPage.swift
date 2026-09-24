@@ -227,7 +227,9 @@ private struct BestShotCard: View {
                         .padding(10)
                 }
                 .overlay(alignment: .bottomTrailing) {
-                    ICloudBadge(state: display).padding(10)
+                    if display.isPreview {
+                        ICloudPreviewTag().padding(10)
+                    }
                 }
                 .overlay(alignment: .bottomLeading) {
                     if let date {
@@ -260,9 +262,9 @@ private struct BestShotCard: View {
         .task(id: assetKey) {
             display = DisplayImageState()
             let identifier = String(assetKey.dropFirst("photos:".count))
-            for await update in model.imageProvider.displayImage(for: identifier) {
-                display.apply(update)
-            }
+            // Local copy only (or the small iCloud thumbnail): the
+            // full-size one is downloaded only from the detail view.
+            display.image = await model.imageProvider.previewImage(for: identifier)
         }
     }
 }

@@ -681,6 +681,7 @@ struct AssetViewer: View {
 /// iCloud is streamed from there when the user opens it (analysis never
 /// touches the network; watching a video the user chose does).
 struct VideoPlayerView: View {
+    @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     let assetKey: String
     var showsClose = true
@@ -694,6 +695,10 @@ struct VideoPlayerView: View {
     @State private var isScrubbing = false
     @State private var unavailable = false
     @State private var downloadProgress: Double?
+    /// The video is only in iCloud; streaming it costs data, so it waits
+    /// for the user to ask.
+    @State private var needsDownload = false
+    @State private var poster: UIImage?
     @State private var timeObserver: Any?
 
     var body: some View {
@@ -702,6 +707,19 @@ struct VideoPlayerView: View {
                 if let player {
                     PlayerLayerView(player: player)
                         .onTapGesture { togglePlayback() }
+                } else if needsDownload {
+                    ZStack {
+                        if let poster {
+                            Image(uiImage: poster).resizable().scaledToFit()
+                        }
+                        Button {
+                            needsDownload = false
+                            Task { await load(allowNetwork: true) }
+                        } label: {
+                            Label("Download from iCloud", systemImage: "icloud.and.arrow.down")
+                        }
+                        .buttonStyle(.wood)
+                    }
                 } else if unavailable {
                     VStack(spacing: 14) {
                         Text("This video couldn't be loaded. If it's in iCloud, check your connection — or open it in Photos.")
@@ -738,11 +756,11 @@ struct VideoPlayerView: View {
         .overlay(alignment: .bottom) {
             if player != nil { controls }
         }
-        // Only the page on screen loads: a neighbour in the pager must
-        // not start pulling its video from iCloud.
+        // Only the page on screen loads, and only what's on the phone:
+        // a video in iCloud is downloaded when the user taps for it.
         .task(id: isCurrent) {
-            guard isCurrent, player == nil, !unavailable else { return }
-            await load()
+            guard isCurrent, player == nil, !unavailable, !needsDownload else { return }
+            await load(allowNetwork: false)
         }
         .onChange(of: isCurrent) { _, current in
             if !current, isPlaying {
@@ -803,15 +821,23 @@ struct VideoPlayerView: View {
         isPlaying.toggle()
     }
 
-    private func load() async {
+    private func load(allowNetwork: Bool) async {
         let identifier = String(assetKey.dropFirst("photos:".count))
+        guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [identifier], options: nil).firstObject else {
+            unavailable = true
+            return
+        }
         guard
-            let asset = PHAsset.fetchAssets(withLocalIdentifiers: [identifier], options: nil).firstObject,
-            let item = await Self.playerItem(for: asset, progress: { progress in
+            let item = await Self.playerItem(for: asset, allowNetwork: allowNetwork, progress: { progress in
                 Task { @MainActor in downloadProgress = progress }
             })?.item
         else {
-            unavailable = true
+            if allowNetwork {
+                unavailable = true
+            } else {
+                needsDownload = true
+                poster = await model.imageProvider.previewImage(for: identifier)
+            }
             return
         }
         downloadProgress = nil
@@ -836,18 +862,19 @@ struct VideoPlayerView: View {
         }
     }
 
-    /// A player item for the video — the local file, or streamed from
-    /// iCloud when the original isn't on the phone. A player item (not a
+    /// A player item for the video — the local file, or (only with
+    /// `allowNetwork`, after the user asked) streamed from iCloud. A player item (not a
     /// file URL) also covers slow-motion and edited videos, which
     /// PhotoKit hands back as compositions. `nonisolated` so the
     /// PhotoKit callbacks aren't main-actor bound — PhotoKit calls them
     /// on its own queue.
     nonisolated private static func playerItem(
         for asset: PHAsset,
+        allowNetwork: Bool,
         progress: @escaping @Sendable (Double) -> Void
     ) async -> LoadedItem? {
         let options = PHVideoRequestOptions()
-        options.isNetworkAccessAllowed = true
+        options.isNetworkAccessAllowed = allowNetwork
         options.deliveryMode = .automatic
         options.version = .current
         options.progressHandler = { value, error, _, _ in

@@ -284,16 +284,28 @@ private struct SwipePhotoCard: View {
     let assetKey: String
     let badges: [Badge]
 
-    @State private var display = DisplayImageState()
+    @State private var image: UIImage?
+    @State private var loaded = false
+
+    /// Only the small local (or small iCloud) copy is showing — the
+    /// original is in iCloud and triage doesn't download it.
+    private var isPreview: Bool {
+        guard let image else { return false }
+        return !AssetImageProvider.isDisplaySized(image)
+    }
 
     var body: some View {
         RoundedRectangle(cornerRadius: 24, style: .continuous)
             .fill(.black)
             .overlay {
-                if let image = display.image {
+                if let image {
                     Image(uiImage: image)
                         .resizable()
                         .scaledToFit()
+                } else if loaded {
+                    Image(systemName: "icloud.slash")
+                        .font(.largeTitle)
+                        .foregroundStyle(Camp.cream.opacity(0.7))
                 } else {
                     CampSpinner(color: Camp.cream)
                 }
@@ -338,14 +350,16 @@ private struct SwipePhotoCard: View {
                 }
             }
             .overlay(alignment: .bottomTrailing) {
-                ICloudBadge(state: display).padding(12)
+                if isPreview {
+                    ICloudPreviewTag().padding(12)
+                }
             }
             .task(id: assetKey) {
-                display = DisplayImageState()
+                image = nil
+                loaded = false
                 let identifier = String(assetKey.dropFirst("photos:".count))
-                for await update in model.imageProvider.displayImage(for: identifier) {
-                    display.apply(update)
-                }
+                image = await model.imageProvider.previewImage(for: identifier)
+                loaded = !Task.isCancelled
             }
     }
 }
