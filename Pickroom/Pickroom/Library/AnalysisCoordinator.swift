@@ -215,14 +215,23 @@ final class AnalysisCoordinator {
                 updated[position].isUtility = result.isUtility
                 updated[position].faceCaptureQuality = result.faceCaptureQuality
                 updated[position].scoredFromStandIn = AssetImageProvider.isStandIn(rendition)
-                let hasher = hasher
-                updated[position].contentHash = await Task.detached(priority: .utility) {
-                    hasher.hash(
-                        image: rendition,
-                        pixelWidth: record.pixelWidth,
-                        pixelHeight: record.pixelHeight
-                    )
-                }.value
+                // A stand-in is a tiny, heavily compressed thumbnail:
+                // different shots of the same scene at the same pixel
+                // size decode to identical pixels, so its hash would
+                // call them exact duplicates. Only a real rendition is
+                // hashed.
+                if updated[position].scoredFromStandIn {
+                    updated[position].contentHash = nil
+                } else {
+                    let hasher = hasher
+                    updated[position].contentHash = await Task.detached(priority: .utility) {
+                        hasher.hash(
+                            image: rendition,
+                            pixelWidth: record.pixelWidth,
+                            pixelHeight: record.pixelHeight
+                        )
+                    }.value
+                }
                 // A stand-in (degraded iCloud thumbnail) is re-scored once
                 // the real rendition is local, so it is not saved.
                 if !updated[position].scoredFromStandIn {

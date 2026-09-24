@@ -35,6 +35,20 @@ final class CrossYearTests: XCTestCase {
         let exact = try XCTUnwrap(groups.first { $0.kind == .exactDuplicate })
         XCTAssertEqual(Set(exact.memberKeys), ["a", "b"])
     }
+
+    func testStandInHashesNeverFormExactDuplicates() {
+        // iCloud-only photos are analysed from a tiny local thumbnail;
+        // similar shots share its pixels, so equal hashes prove nothing.
+        let hash = Data([0x0A, 0x0B])
+        var a = Fixtures.asset("a", capturedAt: Fixtures.base, contentHash: hash)
+        var b = Fixtures.asset("b", capturedAt: Fixtures.base.addingTimeInterval(2), contentHash: hash)
+        a.scoredFromStandIn = true
+        b.scoredFromStandIn = true
+
+        let (groups, summary) = GroupEngine().makeGroups(assets: [a, b])
+        XCTAssertTrue(groups.filter { $0.kind == .exactDuplicate }.isEmpty)
+        XCTAssertEqual(summary.exactDuplicateCount, 0)
+    }
 }
 
 /// Time clustering: the boundary conditions the session logic must

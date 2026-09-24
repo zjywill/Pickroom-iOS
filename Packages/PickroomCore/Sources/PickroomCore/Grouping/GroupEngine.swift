@@ -183,7 +183,9 @@ public struct GroupEngine: Sendable {
     /// files are the same file regardless of when they were taken.
     private func makeExactDuplicateGroups(_ assets: [AssetRecord]) -> [PhotoGroup] {
         var byHash: [Data: [AssetRecord]] = [:]
-        for asset in assets where asset.mediaType == .image {
+        // A hash taken from a stand-in thumbnail cannot tell similar
+        // shots apart, so it never proves two files identical.
+        for asset in assets where asset.mediaType == .image && !asset.scoredFromStandIn {
             guard let hash = asset.contentHash else { continue }
             byHash[hash, default: []].append(asset)
         }
