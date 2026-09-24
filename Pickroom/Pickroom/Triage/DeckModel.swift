@@ -27,11 +27,13 @@ struct CardModel: Identifiable, Hashable {
 /// near-identical shots.
 ///
 /// Semantics (§5):
-/// - swipe right — keep (resolve; nothing from this card is deleted)
-/// - swipe left — discard **exactly the marked members** (the app's
-///   confident-bad frames by default)
+/// - Triage walks each set one photo at a time (`swipeMember`): swipe
+///   left marks the photo for deletion, swipe right keeps it; the last
+///   photo resolves the set with exactly those marks
+/// - `keep()` / `discard()` resolve a whole card at once — keep, or
+///   discard **exactly the marked members** (the app's confident-bad
+///   frames by default)
 /// - swipe up — decide later (card goes to the back of the deck)
-/// - tap — inspect larger; the "Whole set" button — every member
 ///
 /// Keep-all kinds (bracket, session) never propose anything: swipe
 /// left resolves them as keep, because there is nothing they are
@@ -51,12 +53,36 @@ final class DeckModel {
         let previous: [String: PhotoDecision]
         let previousMarks: Set<String>
         let wasResolved: GroupState
+        /// The photo-by-photo walk that resolved the set, so going back
+        /// lands on its last photo rather than the top of the set.
+        var memberCursor: MemberCursor? = nil
+    }
+
+    /// One swiped photo inside the current set: the card as it was
+    /// before, so back restores the mark exactly.
+    struct MemberStep {
+        let key: String
+        let card: CardModel
+        /// The swipe withdrew the user's own pick; back re-picks it.
+        let clearedPick: Bool
+    }
+
+    /// Where the user is in the current set's photo-by-photo walk. The
+    /// order is frozen at the first swipe, so a late ranking can't
+    /// reshuffle photos under the user's thumb.
+    struct MemberCursor {
+        let cardID: String
+        let order: [String]
+        var history: [MemberStep] = []
+
+        var position: Int { history.count }
     }
 
     private(set) var cards: [CardModel]
     private(set) var laterQueue: [CardModel]
     private(set) var currentIndex: Int
     private(set) var undoStack: [UndoEntry] = []
+    private var memberCursor: MemberCursor?
 
     private var records: [String: AssetRecord]
     private let persistence: PersistenceStore
@@ -181,6 +207,7 @@ final class DeckModel {
     /// the next card slides into place.
     func decideLater() {
         guard let card = currentCard else { return }
+        memberCursor = nil
         commitHaptic()
         if currentIndex < cards.count {
             cards.remove(at: currentIndex)
@@ -274,6 +301,103 @@ final class DeckModel {
         for index in cards.indices { cards[index].markedKeys.remove(key) }
         for index in laterQueue.indices { laterQueue[index].markedKeys.remove(key) }
         lightHaptic()
+    }
+
+    // MARK: - One photo at a time
+
+    /// The current set's photos in walk order: the keeper first, so the
+    /// best frame is judged before its weaker siblings, then the set's
+    /// own (chronological) order.
+    var memberOrder: [String] {
+        if let cursor = activeCursor { return cursor.order }
+        guard let card = currentCard else { return [] }
+        return reviewOrder(for: card)
+    }
+
+    /// How many of the current set's photos have been swiped.
+    var memberPosition: Int { activeCursor?.position ?? 0 }
+
+    /// The photo on screen, or nil once the set is done.
+    var currentMemberKey: String? {
+        let order = memberOrder
+        return memberPosition < order.count ? order[memberPosition] : nil
+    }
+
+    /// Swipe left (`discard: true`) marks the photo on screen for
+    /// deletion; swipe right keeps it. The last photo resolves the set
+    /// with exactly these marks and brings up the next set. A swipe
+    /// left on the user's own pick withdraws the pick — the latest
+    /// explicit gesture wins.
+    func swipeMember(discard: Bool) {
+        guard var card = currentCard else { return }
+        var cursor = activeCursor ?? MemberCursor(cardID: card.id, order: reviewOrder(for: card))
+        guard cursor.position < cursor.order.count else { return }
+        let key = cursor.order[cursor.position]
+        let before = card
+        var clearedPick = false
+        if discard {
+            card.markedKeys.insert(key)
+            if decisions[key] == .pick {
+                clearDecision(key)
+                clearedPick = true
+            }
+        } else {
+            card.markedKeys.remove(key)
+        }
+        card.userEdited = true
+        replaceCurrentCard(card)
+        cursor.history.append(MemberStep(key: key, card: before, clearedPick: clearedPick))
+
+        if cursor.position == cursor.order.count {
+            memberCursor = nil
+            applySwipe(.resolve, memberCursor: cursor)
+        } else {
+            memberCursor = cursor
+            lightHaptic()
+        }
+    }
+
+    var canGoBack: Bool { memberPosition > 0 || canUndo }
+
+    /// Back undoes exactly one swipe: the previous photo in this set,
+    /// or — from a set's first photo — the last photo of the set before.
+    func back() {
+        if var cursor = activeCursor, let step = cursor.history.popLast() {
+            restore(step)
+            memberCursor = cursor
+            undoHaptic()
+            return
+        }
+        guard let entry = undoStack.last else { return }
+        undo()
+        if var cursor = entry.memberCursor,
+           cursor.cardID == currentCard?.id,
+           let step = cursor.history.popLast() {
+            restore(step)
+            memberCursor = cursor
+        }
+    }
+
+    private var activeCursor: MemberCursor? {
+        guard let cursor = memberCursor, cursor.cardID == currentCard?.id else { return nil }
+        return cursor
+    }
+
+    private func reviewOrder(for card: CardModel) -> [String] {
+        let members = card.group.memberKeys
+        guard let keeper = keeperKey(for: card), members.contains(keeper) else { return members }
+        return [keeper] + members.filter { $0 != keeper }
+    }
+
+    /// Puts the current card's marks back as they were before `step`.
+    private func restore(_ step: MemberStep) {
+        guard var card = currentCard, card.id == step.card.id else { return }
+        card.markedKeys = step.card.markedKeys.intersection(card.group.memberKeys)
+        card.userEdited = step.card.userEdited
+        replaceCurrentCard(card)
+        if step.clearedPick {
+            recordDecision(step.key, .pick)
+        }
     }
 
     // MARK: - Batch decisions
@@ -453,6 +577,7 @@ final class DeckModel {
     /// already decided to keep, and the deck gets abandoned.
     func dismissCurrentCard() {
         guard let card = currentCard else { return }
+        memberCursor = nil
         let groupID = card.group.id
         enqueueWrite {
             await self.persistence.saveGroupState(id: groupID, state: .dismissed)
@@ -474,6 +599,7 @@ final class DeckModel {
     /// restored at once.
     func undo() {
         guard let entry = undoStack.popLast() else { return }
+        memberCursor = nil
         for (key, decision) in entry.previous {
             decisions[key] = decision
         }
@@ -607,8 +733,9 @@ final class DeckModel {
         case resolve
     }
 
-    private func applySwipe(_ direction: SwipeDirection) {
+    private func applySwipe(_ direction: SwipeDirection, memberCursor walked: MemberCursor? = nil) {
         guard let card = currentCard else { return }
+        memberCursor = nil
 
         // Swipe left discards exactly the marked members. On keep-all
         // kinds there is nothing the card may propose, so the swipe
@@ -691,7 +818,8 @@ final class DeckModel {
                 applied: applied,
                 previous: previous,
                 previousMarks: card.markedKeys,
-                wasResolved: .pending
+                wasResolved: .pending,
+                memberCursor: walked
             )
         )
 

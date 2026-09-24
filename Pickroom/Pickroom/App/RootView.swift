@@ -62,6 +62,7 @@ struct RootView: View {
             .tag(RootTab.review)
         }
         .environment(\.campTabBarInset, tabBarHeight)
+        .environment(\.selectRootTab, { tab = $0 })
         .overlay(alignment: .bottom) {
             CampTabBar(selection: $tab)
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { tabBarHeight = $0 }
@@ -108,6 +109,7 @@ struct RootView: View {
             }
             .id(tab)
         }
+        .environment(\.selectRootTab, { tab = $0 })
     }
 
     @ViewBuilder

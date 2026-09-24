@@ -28,8 +28,8 @@ protocol ShakeResponder: AnyObject {
 }
 
 extension DeckModel: ShakeResponder {
-    var canUndoShake: Bool { canUndo }
-    func undoFromShake() { undo() }
+    var canUndoShake: Bool { canGoBack }
+    func undoFromShake() { back() }
 }
 
 /// UIKit motion → SwiftUI bridge.

@@ -545,4 +545,101 @@ final class DeckModelTests: XCTestCase {
         await deck.rankCurrentCard()
         XCTAssertEqual(deck.currentCard?.markedKeys, [])
     }
+
+    // MARK: - One photo at a time
+
+    func testSwipingEachPhotoResolvesTheSetWithExactlyThoseChoices() async {
+        let other = PhotoGroup(
+            id: "other", kind: .expiredUtility, memberKeys: ["photos:c"], representativeKey: "photos:c",
+            certainty: 0.5, flaggedKeys: [], suggestedKeeperKey: nil, headline: "1 screenshot"
+        )
+        let pair = PhotoGroup(
+            id: "pair", kind: .burst, memberKeys: ["photos:a", "photos:b"], representativeKey: "photos:a",
+            certainty: 0.8, flaggedKeys: [], suggestedKeeperKey: "photos:b", headline: "2 shots"
+        )
+        let deck = DeckModel(groups: [pair, other], records: makeRecords(), persistence: persistence)
+        await deck.rankCurrentCard()
+
+        XCTAssertEqual(deck.memberOrder, ["photos:b", "photos:a"], "the keeper is judged first")
+        XCTAssertEqual(deck.currentMemberKey, "photos:b")
+
+        // Toss the suggested keeper, keep the one the app proposed tossing.
+        deck.swipeMember(discard: true)
+        XCTAssertEqual(deck.currentCard?.id, "pair", "the set stays up until its last photo")
+        XCTAssertEqual(deck.currentMemberKey, "photos:a")
+        deck.swipeMember(discard: false)
+
+        XCTAssertEqual(deck.currentCard?.id, "other", "the last photo brings up the next set")
+        XCTAssertEqual(deck.memberPosition, 0)
+        XCTAssertEqual(deck.decisions["photos:b"], .reject)
+        XCTAssertNil(deck.decisions["photos:a"])
+        await deck.settleWrites()
+        let states = await persistence.loadGroupStates()
+        XCTAssertEqual(states["pair"], .resolved)
+    }
+
+    func testBackUndoesOneSwipeAtATimeAcrossSets() async {
+        let first = PhotoGroup(
+            id: "first", kind: .expiredUtility, memberKeys: ["photos:a", "photos:b"], representativeKey: "photos:a",
+            certainty: 0.5, flaggedKeys: [], suggestedKeeperKey: nil, headline: "2 screenshots"
+        )
+        let second = PhotoGroup(
+            id: "second", kind: .expiredUtility, memberKeys: ["photos:c"], representativeKey: "photos:c",
+            certainty: 0.5, flaggedKeys: [], suggestedKeeperKey: nil, headline: "1 screenshot"
+        )
+        let deck = DeckModel(groups: [first, second], records: makeRecords(), persistence: persistence)
+        XCTAssertFalse(deck.canGoBack)
+
+        deck.swipeMember(discard: true)   // a: toss
+        XCTAssertTrue(deck.canGoBack)
+        deck.back()
+        XCTAssertEqual(deck.currentMemberKey, "photos:a")
+        XCTAssertEqual(deck.currentCard?.markedKeys, [], "back puts the mark back as it was")
+
+        deck.swipeMember(discard: true)   // a: toss
+        deck.swipeMember(discard: false)  // b: keep → resolves
+        XCTAssertEqual(deck.currentCard?.id, "second")
+        XCTAssertEqual(deck.decisions["photos:a"], .reject)
+
+        // From the next set's first photo, back lands on the last photo
+        // of the set before — undecided, with the earlier swipe intact.
+        deck.back()
+        XCTAssertEqual(deck.currentCard?.id, "first")
+        XCTAssertEqual(deck.memberPosition, 1)
+        XCTAssertEqual(deck.currentMemberKey, "photos:b")
+        XCTAssertEqual(deck.currentCard?.markedKeys, ["photos:a"])
+        XCTAssertNil(deck.decisions["photos:a"], "the set is pending again until it resolves")
+
+        deck.swipeMember(discard: true)   // b: toss this time
+        XCTAssertEqual(deck.currentCard?.id, "second")
+        XCTAssertEqual(deck.decisions["photos:a"], .reject)
+        XCTAssertEqual(deck.decisions["photos:b"], .reject)
+    }
+
+    func testSwipingLeftOnAPickWithdrawsItAndBackRestoresIt() async {
+        let group = PhotoGroup(
+            id: "pair", kind: .burst, memberKeys: ["photos:a", "photos:b"], representativeKey: "photos:a",
+            certainty: 0.8, flaggedKeys: [], suggestedKeeperKey: nil, headline: "2 shots"
+        )
+        let deck = DeckModel(groups: [group], records: makeRecords(), persistence: persistence)
+        deck.makeKeeper(memberKey: "photos:b")
+        XCTAssertEqual(deck.currentMemberKey, "photos:b")
+
+        deck.swipeMember(discard: true)
+        XCTAssertNil(deck.decisions["photos:b"])
+        deck.back()
+        XCTAssertEqual(deck.decisions["photos:b"], .pick)
+    }
+
+    func testLaterRestartsTheSetsWalk() {
+        let group = PhotoGroup(
+            id: "shots", kind: .expiredUtility, memberKeys: ["photos:a", "photos:b"], representativeKey: "photos:a",
+            certainty: 0.5, flaggedKeys: [], suggestedKeeperKey: nil, headline: "2 screenshots"
+        )
+        let deck = DeckModel(groups: [group], records: makeRecords(), persistence: persistence)
+        deck.swipeMember(discard: false)
+        deck.decideLater()
+        XCTAssertEqual(deck.currentCard?.id, "shots", "the only set comes straight back")
+        XCTAssertEqual(deck.memberPosition, 0)
+    }
 }

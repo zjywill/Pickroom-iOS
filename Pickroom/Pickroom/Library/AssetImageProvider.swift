@@ -10,10 +10,11 @@ import PickroomCore
 ///
 /// Analysis never touches the network: grouping and scoring work from
 /// local renditions, and an iCloud-only asset is scored from the small
-/// thumbnail Optimise Storage keeps on the phone. The exceptions are
-/// what's on screen: `displayImage(for:)` — a photo the user opened to
-/// look at, whose display-sized rendition is fetched from iCloud when it
-/// isn't here — and a grid `thumbnail(for:)` with no local copy at all.
+/// thumbnail Optimise Storage keeps on the phone. On screen, photos
+/// show what's local; only a grid `thumbnail(for:)` (or a
+/// `previewImage(for:)`) with no local copy at all fetches the small
+/// thumbnail. The full-size copy — `displayImage(for:)` — is fetched
+/// only when the user taps Download in the detail view.
 actor AssetImageProvider {
     static let analysisTargetSize = CGSize(width: 256, height: 256)
     static let cardTargetSize = CGSize(width: 900, height: 1200)
@@ -162,6 +163,40 @@ actor AssetImageProvider {
         return image
     }
 
+    /// A photo on screen (swipe card, set page, detail view): the best
+    /// rendition already on the phone — the card-sized copy, or for an
+    /// iCloud-only original the small thumbnail Optimise Storage keeps.
+    /// With nothing local, the small grid rendition from iCloud; never a
+    /// display-sized copy or the original, so browsing costs almost no
+    /// data. Full size is the detail view's Download (`displayImage(for:)`).
+    func previewImage(for identifier: String) async -> UIImage? {
+        if let cached = cache[identifier] { return cached }
+        guard
+            let asset = PHAsset.fetchAssets(
+                withLocalIdentifiers: [identifier],
+                options: nil
+            ).firstObject
+        else { return nil }
+        let options = Self.imageOptions(allowSynchronous: false)
+        options.deliveryMode = .opportunistic
+        let local = await Self.request(
+            asset,
+            manager: manager,
+            targetSize: Self.cardTargetSize,
+            contentMode: .aspectFit,
+            options: options,
+            acceptDegraded: true
+        )
+        if let local {
+            // Only a real card rendition goes in the card cache; a small
+            // stand-in there would pass for the display copy.
+            if Self.isDisplaySized(local) { storeInCache(key: identifier, image: local) }
+            return local
+        }
+        guard !Task.isCancelled else { return nil }
+        return await thumbnail(for: identifier)
+    }
+
     /// Small rendition for pixel analysis (Stage A′).
     func analysisRendition(for identifier: String) async -> CGImage? {
         guard
@@ -196,11 +231,11 @@ actor AssetImageProvider {
         case unavailable
     }
 
-    /// A photo the user opened: the local card rendition when the phone
-    /// has one; otherwise whatever small copy is local first, then a
-    /// display-sized rendition from iCloud (not the original, and
-    /// nothing is added to the library). Only ever called for a photo on
-    /// screen — analysis stays offline.
+    /// A photo the user asked to download: the local card rendition when
+    /// the phone has one; otherwise whatever small copy is local first,
+    /// then a display-sized rendition from iCloud (not the original, and
+    /// nothing is added to the library). Only ever called from the
+    /// detail view's Download button — it costs the user data.
     nonisolated func displayImage(for identifier: String) -> AsyncStream<DisplayUpdate> {
         AsyncStream { continuation in
             let work = Task {

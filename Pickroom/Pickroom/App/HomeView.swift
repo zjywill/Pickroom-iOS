@@ -10,6 +10,7 @@ import PickroomCore
 struct HomeView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.selectRootTab) private var selectRootTab
     @State private var scrolledPastHeader = false
     @State private var showingSituation = false
     /// The situation already explained. A different one (say iCloud
@@ -118,12 +119,8 @@ struct HomeView: View {
 
     private var triageSection: some View {
         VStack(spacing: 14) {
-            NavigationLink {
-                if let deck = model.deck {
-                    DeckView(deck: deck)
-                } else {
-                    CampLoadingView(message: "Loading your library…")
-                }
+            Button {
+                selectRootTab(.triage)
             } label: {
                 HStack(spacing: 14) {
                     VStack(alignment: .leading, spacing: 4) {

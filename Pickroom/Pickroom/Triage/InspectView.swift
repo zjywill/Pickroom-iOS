@@ -12,6 +12,8 @@ struct InspectView: View {
 
     @State private var display = DisplayImageState()
     private var image: UIImage? { display.image }
+    /// The user asked for the full-size copy from iCloud.
+    @State private var downloading = false
     @State private var scale: CGFloat = 1
     @State private var lastScale: CGFloat = 1
     @State private var offset: CGSize = .zero
@@ -71,6 +73,10 @@ struct InspectView: View {
                                 }
                             }
                         }
+                } else if display.loaded, !downloading {
+                    Image(systemName: "icloud.slash")
+                        .font(.largeTitle)
+                        .foregroundStyle(Camp.cream.opacity(0.7))
                 } else {
                     CampSpinner(color: Camp.cream)
                 }
@@ -87,10 +93,31 @@ struct InspectView: View {
             }
         }
         .overlay(alignment: .bottom) {
-            ICloudBadge(state: display)
-                .padding(.bottom, 180)
+            Group {
+                if downloading {
+                    ICloudBadge(state: display)
+                } else if display.isPreview || (display.loaded && display.image == nil) {
+                    // Only the small local copy is here. The full-size one
+                    // costs data, so it's the user's call, never automatic.
+                    Button {
+                        downloading = true
+                    } label: {
+                        Label("Download from iCloud", systemImage: "icloud.and.arrow.down")
+                    }
+                    .buttonStyle(.wood)
+                }
+            }
+            .padding(.bottom, 180)
         }
         .task(id: assetKey) {
+            downloading = false
+            display = DisplayImageState()
+            let identifier = String(assetKey.dropFirst("photos:".count))
+            display.image = await model.imageProvider.previewImage(for: identifier)
+            display.loaded = !Task.isCancelled
+        }
+        .task(id: downloading) {
+            guard downloading else { return }
             let identifier = String(assetKey.dropFirst("photos:".count))
             for await update in model.imageProvider.displayImage(for: identifier) {
                 display.apply(update)
@@ -105,6 +132,14 @@ struct DisplayImageState {
     var image: UIImage?
     var downloadProgress: Double?
     var unavailable = false
+    /// The first (local-only) load finished, with or without an image.
+    var loaded = false
+
+    /// Only a small copy is showing — the original is in iCloud.
+    var isPreview: Bool {
+        guard let image else { return false }
+        return !AssetImageProvider.isDisplaySized(image)
+    }
 
     mutating func apply(_ update: AssetImageProvider.DisplayUpdate) {
         switch update {
@@ -143,5 +178,19 @@ struct ICloudBadge: View {
         .background(Capsule().fill(Camp.ink.opacity(0.7)))
         .opacity(state.downloadProgress != nil || state.unavailable ? 1 : 0)
         .monospacedDigit()
+    }
+}
+
+/// "iCloud preview": the photo on screen is the small copy the phone
+/// keeps; the full-size one is only downloaded on request.
+struct ICloudPreviewTag: View {
+    var body: some View {
+        Label("iCloud preview", systemImage: "icloud")
+            .font(.caption.weight(.bold))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(Capsule().fill(Camp.ink.opacity(0.7)))
+            .accessibilityLabel("In iCloud — small preview. Open it to download full size.")
     }
 }
