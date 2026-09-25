@@ -134,10 +134,7 @@ actor PhotoKitLibrary {
     /// pair is never called an exact duplicate.
     nonisolated static func originalHash(identifier: String) async -> Data? {
         guard
-            let asset = PHAsset.fetchAssets(
-                withLocalIdentifiers: [identifier],
-                options: nil
-            ).firstObject
+            let asset = PHAsset.fetchAssets(withLocalIdentifiers: [identifier]).firstObject
         else { return nil }
         let photoTypes: [PHAssetResourceType] = [.photo, .fullSizePhoto, .alternatePhoto]
         let resources = PHAssetResource.assetResources(for: asset)
@@ -172,10 +169,7 @@ actor PhotoKitLibrary {
     /// near-duplicate candidates the `versions` guard can affect.
     nonisolated static func hasAdjustments(identifier: String) -> Bool {
         guard
-            let asset = PHAsset.fetchAssets(
-                withLocalIdentifiers: [identifier],
-                options: nil
-            ).firstObject
+            let asset = PHAsset.fetchAssets(withLocalIdentifiers: [identifier]).firstObject
         else { return false }
         return PHAssetResource.assetResources(for: asset).contains {
             $0.type == .adjustmentData || $0.type == .fullSizePhoto
@@ -189,10 +183,7 @@ actor PhotoKitLibrary {
     /// covers that case.
     nonisolated static func exposureBias(identifier: String) async -> Double? {
         guard
-            let asset = PHAsset.fetchAssets(
-                withLocalIdentifiers: [identifier],
-                options: nil
-            ).firstObject
+            let asset = PHAsset.fetchAssets(withLocalIdentifiers: [identifier]).firstObject
         else { return nil }
         let options = PHImageRequestOptions()
         options.isNetworkAccessAllowed = false
@@ -291,5 +282,19 @@ private final class LockedDigest: @unchecked Sendable {
 
     func finalize() -> Data {
         lock.withLock { Data(digest.finalize()) }
+    }
+}
+
+extension PHAsset {
+    /// Looks assets up by identifier with the same reach as the library
+    /// read. With default options PhotoKit returns only a burst's
+    /// representative frame (and no hidden assets), so every other
+    /// burst frame would silently come back empty — no thumbnail, no
+    /// analysis, and dropped from a deletion batch.
+    static func fetchAssets(withLocalIdentifiers identifiers: [String]) -> PHFetchResult<PHAsset> {
+        let options = PHFetchOptions()
+        options.includeHiddenAssets = true
+        options.includeAllBurstAssets = true
+        return fetchAssets(withLocalIdentifiers: identifiers, options: options)
     }
 }

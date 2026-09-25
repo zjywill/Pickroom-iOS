@@ -64,7 +64,7 @@ actor AssetImageProvider {
         let entering = identifiers.filter { windowAssets[$0] == nil }
         if !entering.isEmpty {
             var fresh: [PHAsset] = []
-            PHAsset.fetchAssets(withLocalIdentifiers: entering, options: nil)
+            PHAsset.fetchAssets(withLocalIdentifiers: entering)
                 .enumerateObjects { asset, _, _ in fresh.append(asset) }
             for asset in fresh { windowAssets[asset.localIdentifier] = asset }
             manager.startCachingImages(
@@ -91,10 +91,7 @@ actor AssetImageProvider {
     func thumbnail(for identifier: String) async -> UIImage? {
         if let cached = thumbnails[identifier] { return cached }
         guard
-            let asset = PHAsset.fetchAssets(
-                withLocalIdentifiers: [identifier],
-                options: nil
-            ).firstObject
+            let asset = PHAsset.fetchAssets(withLocalIdentifiers: [identifier]).firstObject
         else { return nil }
         // Opportunistic: for an iCloud-only original a high-quality local
         // request delivers nothing, but the small thumbnail Optimise
@@ -143,10 +140,7 @@ actor AssetImageProvider {
     func cardImage(for identifier: String) async -> UIImage? {
         if let cached = cache[identifier] { return cached }
         guard
-            let asset = PHAsset.fetchAssets(
-                withLocalIdentifiers: [identifier],
-                options: nil
-            ).firstObject
+            let asset = PHAsset.fetchAssets(withLocalIdentifiers: [identifier]).firstObject
         else { return nil }
 
         let image = await Self.request(
@@ -172,10 +166,7 @@ actor AssetImageProvider {
     func previewImage(for identifier: String) async -> UIImage? {
         if let cached = cache[identifier] { return cached }
         guard
-            let asset = PHAsset.fetchAssets(
-                withLocalIdentifiers: [identifier],
-                options: nil
-            ).firstObject
+            let asset = PHAsset.fetchAssets(withLocalIdentifiers: [identifier]).firstObject
         else { return nil }
         let options = Self.imageOptions(allowSynchronous: false)
         options.deliveryMode = .opportunistic
@@ -209,10 +200,7 @@ actor AssetImageProvider {
 
     func analysisRendition(for identifier: String) async -> AnalysisRendition? {
         guard
-            let asset = PHAsset.fetchAssets(
-                withLocalIdentifiers: [identifier],
-                options: nil
-            ).firstObject
+            let asset = PHAsset.fetchAssets(withLocalIdentifiers: [identifier]).firstObject
         else { return nil }
         // Opportunistic: when the original is in iCloud the final
         // delivery is empty, and the local thumbnail delivered first is
@@ -273,7 +261,7 @@ actor AssetImageProvider {
         into continuation: AsyncStream<DisplayUpdate>.Continuation
     ) {
         guard
-            let asset = PHAsset.fetchAssets(withLocalIdentifiers: [identifier], options: nil).firstObject
+            let asset = PHAsset.fetchAssets(withLocalIdentifiers: [identifier]).firstObject
         else {
             continuation.yield(.unavailable)
             continuation.finish()

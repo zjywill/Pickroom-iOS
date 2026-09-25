@@ -367,7 +367,7 @@ final class AppModel {
     /// API; `fileSize` on `PHAssetResource` is the long-standing way.
     nonisolated private static func fileSizes(identifiers: [String]) -> [String: Int64] {
         var sizes: [String: Int64] = [:]
-        let assets = PHAsset.fetchAssets(withLocalIdentifiers: identifiers, options: nil)
+        let assets = PHAsset.fetchAssets(withLocalIdentifiers: identifiers)
         assets.enumerateObjects { asset, _, _ in
             let total = PHAssetResource.assetResources(for: asset)
                 .filter { $0.type == .video || $0.type == .fullSizeVideo || $0.type == .pairedVideo }
@@ -449,10 +449,7 @@ final class AppModel {
         guard !candidates.isEmpty else { return false }
 
         let identifiers = candidates.map { String($0.dropFirst("photos:".count)) }
-        let assets = PHAsset.fetchAssets(
-            withLocalIdentifiers: identifiers,
-            options: nil
-        )
+        let assets = PHAsset.fetchAssets(withLocalIdentifiers: identifiers)
         guard assets.count > 0 else { return false }
 
         // Only assets that still exist AND are deletable enter the
@@ -505,7 +502,7 @@ final class AppModel {
     /// at runtime the moment PhotoKit calls it.
     nonisolated private static func deleteAssets(identifiers: [String]) async throws {
         try await PHPhotoLibrary.shared().performChanges {
-            let assets = PHAsset.fetchAssets(withLocalIdentifiers: identifiers, options: nil)
+            let assets = PHAsset.fetchAssets(withLocalIdentifiers: identifiers)
             PHAssetChangeRequest.deleteAssets(assets)
         }
     }

@@ -823,7 +823,7 @@ struct VideoPlayerView: View {
 
     private func load(allowNetwork: Bool) async {
         let identifier = String(assetKey.dropFirst("photos:".count))
-        guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [identifier], options: nil).firstObject else {
+        guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [identifier]).firstObject else {
             unavailable = true
             return
         }
