@@ -631,6 +631,40 @@ final class DeckModelTests: XCTestCase {
         XCTAssertEqual(deck.decisions["photos:b"], .pick)
     }
 
+    func testJumpingToAnyPhotoFromTheStripAndSwipingIt() {
+        let trio = PhotoGroup(
+            id: "trio", kind: .expiredUtility, memberKeys: ["photos:a", "photos:b", "photos:c"], representativeKey: "photos:a",
+            certainty: 0.5, flaggedKeys: [], suggestedKeeperKey: nil, headline: "3 screenshots"
+        )
+        let deck = DeckModel(groups: [trio], records: makeRecords(), persistence: persistence)
+
+        deck.showMember("photos:c")
+        XCTAssertEqual(deck.currentMemberKey, "photos:c")
+        XCTAssertFalse(deck.canGoBack, "looking around isn't a step to undo")
+
+        deck.swipeMember(discard: true)   // c: toss
+        XCTAssertEqual(deck.currentMemberKey, "photos:a", "the next unswiped photo wraps around")
+        deck.swipeMember(discard: false)  // a: keep
+        XCTAssertEqual(deck.currentMemberKey, "photos:b")
+
+        // Change of heart on c: come back to it and keep it instead.
+        deck.showMember("photos:c")
+        deck.swipeMember(discard: false)
+        XCTAssertEqual(deck.currentMemberKey, "photos:b", "the set waits for its last unswiped photo")
+        XCTAssertEqual(deck.currentCard?.markedKeys, [])
+
+        deck.back()
+        XCTAssertEqual(deck.currentMemberKey, "photos:c", "back lands on the photo that was swiped")
+        XCTAssertEqual(deck.currentCard?.markedKeys, ["photos:c"])
+        XCTAssertTrue(deck.decidedMemberKeys.contains("photos:c"), "it was swiped before")
+
+        deck.showMember("photos:b")
+        deck.swipeMember(discard: false)  // b: keep → resolves
+        XCTAssertNotEqual(deck.currentCard?.id, "trio")
+        XCTAssertEqual(deck.decisions["photos:c"], .reject)
+        XCTAssertNil(deck.decisions["photos:a"])
+    }
+
     func testLaterRestartsTheSetsWalk() {
         let group = PhotoGroup(
             id: "shots", kind: .expiredUtility, memberKeys: ["photos:a", "photos:b"], representativeKey: "photos:a",

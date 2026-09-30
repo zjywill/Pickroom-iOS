@@ -5,6 +5,7 @@ import PickroomCore
 /// large. Swipe left to toss, right to keep; the last photo resolves
 /// the set and the next one comes up. Nothing leaves the library until
 /// the commit sheet — back (or a shake) undoes one swipe at a time.
+/// Tapping a photo in the strip brings it up to be judged instead.
 struct MemberSwipeView: View {
     @Environment(AppModel.self) private var model
     let deck: DeckModel
@@ -25,7 +26,11 @@ struct MemberSwipeView: View {
             strip(order: order)
             ZStack {
                 if let key = deck.currentMemberKey {
-                    let next = order.firstIndex(of: key).flatMap { order.indices.contains($0 + 1) ? order[$0 + 1] : nil }
+                    let decided = deck.decidedMemberKeys
+                    let next = order.firstIndex(of: key).flatMap { index in
+                        (1..<max(order.count, 1)).map { order[(index + $0) % order.count] }
+                            .first { !decided.contains($0) }
+                    }
                     if let next {
                         SwipePhotoCard(assetKey: next, badges: [])
                             .scaleEffect(0.94)
@@ -88,13 +93,22 @@ struct MemberSwipeView: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
                     ForEach(Array(order.enumerated()), id: \.element) { index, key in
-                        StripThumb(
-                            assetKey: key,
-                            decided: index < deck.memberPosition
-                                ? (card.markedKeys.contains(key) ? .marked : .keeper)
-                                : nil,
-                            isCurrent: index == deck.memberPosition
-                        )
+                        Button {
+                            // An instant swap, so near-identical frames
+                            // can be flicked between and compared.
+                            guard !isFlying else { return }
+                            deck.showMember(key)
+                        } label: {
+                            StripThumb(
+                                assetKey: key,
+                                decided: deck.decidedMemberKeys.contains(key)
+                                    ? (card.markedKeys.contains(key) ? .marked : .keeper)
+                                    : nil,
+                                isCurrent: index == deck.memberPosition
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Photo \(index + 1) of \(order.count)")
                         .id(key)
                     }
                 }
@@ -107,7 +121,6 @@ struct MemberSwipeView: View {
             }
         }
         .frame(height: 60)
-        .accessibilityHidden(true)
     }
 
     // MARK: - Card
@@ -121,8 +134,11 @@ struct MemberSwipeView: View {
             result.append(.init(text: "Best shot", systemImage: "star.fill", fill: Camp.keep))
         }
         // Undecided photos still carry the app's proposal as their mark.
+        let swiped = deck.decidedMemberKeys.contains(key)
         if card.markedKeys.contains(key) {
-            result.append(.init(text: "Suggested: toss", systemImage: "xmark", fill: Camp.toss))
+            result.append(.init(text: swiped ? "Tossed" : "Suggested: toss", systemImage: "xmark", fill: Camp.toss))
+        } else if swiped {
+            result.append(.init(text: "Kept", systemImage: "checkmark", fill: Camp.keep))
         }
         if model.recordsByKey[key]?.sourceType.isDeletable == false {
             result.append(.init(text: "Can't be deleted here", systemImage: "lock.fill", fill: Camp.stone))

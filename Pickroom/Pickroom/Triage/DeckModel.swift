@@ -59,23 +59,36 @@ final class DeckModel {
     }
 
     /// One swiped photo inside the current set: the card as it was
-    /// before, so back restores the mark exactly.
+    /// before, so back restores the mark exactly, and where the user
+    /// was, so back lands on the photo that was swiped.
     struct MemberStep {
         let key: String
         let card: CardModel
         /// The swipe withdrew the user's own pick; back re-picks it.
         let clearedPick: Bool
+        /// The photo had already been swiped once (the user came back
+        /// to it from the strip), so back leaves it decided.
+        let wasDecided: Bool
     }
 
     /// Where the user is in the current set's photo-by-photo walk. The
-    /// order is frozen at the first swipe, so a late ranking can't
-    /// reshuffle photos under the user's thumb.
+    /// order is frozen once the walk starts, so a late ranking can't
+    /// reshuffle photos under the user's thumb. The photo on screen can
+    /// be any of them — the strip jumps around the set — and the set
+    /// resolves once every photo has been swiped.
     struct MemberCursor {
         let cardID: String
         let order: [String]
+        var index = 0
+        var decided: Set<String> = []
         var history: [MemberStep] = []
 
-        var position: Int { history.count }
+        /// The first undecided photo after `index`, wrapping around.
+        var nextUndecided: Int? {
+            (1...order.count)
+                .map { (index + $0) % order.count }
+                .first { !decided.contains(order[$0]) }
+        }
     }
 
     private(set) var cards: [CardModel]
@@ -314,8 +327,11 @@ final class DeckModel {
         return reviewOrder(for: card)
     }
 
-    /// How many of the current set's photos have been swiped.
-    var memberPosition: Int { activeCursor?.position ?? 0 }
+    /// Where the photo on screen sits in `memberOrder`.
+    var memberPosition: Int { activeCursor?.index ?? 0 }
+
+    /// The current set's photos that have been swiped so far.
+    var decidedMemberKeys: Set<String> { activeCursor?.decided ?? [] }
 
     /// The photo on screen, or nil once the set is done.
     var currentMemberKey: String? {
@@ -323,16 +339,26 @@ final class DeckModel {
         return memberPosition < order.count ? order[memberPosition] : nil
     }
 
+    /// Brings any photo of the current set up on screen — swiped or not
+    /// — without deciding anything. Not an undoable step.
+    func showMember(_ key: String) {
+        guard let card = currentCard else { return }
+        var cursor = activeCursor ?? MemberCursor(cardID: card.id, order: reviewOrder(for: card))
+        guard let index = cursor.order.firstIndex(of: key), index != cursor.index else { return }
+        cursor.index = index
+        memberCursor = cursor
+    }
+
     /// Swipe left (`discard: true`) marks the photo on screen for
-    /// deletion; swipe right keeps it. The last photo resolves the set
-    /// with exactly these marks and brings up the next set. A swipe
-    /// left on the user's own pick withdraws the pick — the latest
-    /// explicit gesture wins.
+    /// deletion; swipe right keeps it, and the next unswiped photo comes
+    /// up. The last one resolves the set with exactly these marks and
+    /// brings up the next set. A swipe left on the user's own pick
+    /// withdraws the pick — the latest explicit gesture wins.
     func swipeMember(discard: Bool) {
         guard var card = currentCard else { return }
         var cursor = activeCursor ?? MemberCursor(cardID: card.id, order: reviewOrder(for: card))
-        guard cursor.position < cursor.order.count else { return }
-        let key = cursor.order[cursor.position]
+        guard cursor.order.indices.contains(cursor.index) else { return }
+        let key = cursor.order[cursor.index]
         let before = card
         var clearedPick = false
         if discard {
@@ -346,24 +372,29 @@ final class DeckModel {
         }
         card.userEdited = true
         replaceCurrentCard(card)
-        cursor.history.append(MemberStep(key: key, card: before, clearedPick: clearedPick))
+        cursor.history.append(MemberStep(
+            key: key, card: before, clearedPick: clearedPick,
+            wasDecided: cursor.decided.contains(key)
+        ))
+        cursor.decided.insert(key)
 
-        if cursor.position == cursor.order.count {
-            memberCursor = nil
-            applySwipe(.resolve, memberCursor: cursor)
-        } else {
+        if let next = cursor.nextUndecided {
+            cursor.index = next
             memberCursor = cursor
             lightHaptic()
+        } else {
+            memberCursor = nil
+            applySwipe(.resolve, memberCursor: cursor)
         }
     }
 
-    var canGoBack: Bool { memberPosition > 0 || canUndo }
+    var canGoBack: Bool { activeCursor?.history.isEmpty == false || canUndo }
 
     /// Back undoes exactly one swipe: the previous photo in this set,
     /// or — from a set's first photo — the last photo of the set before.
     func back() {
         if var cursor = activeCursor, let step = cursor.history.popLast() {
-            restore(step)
+            restore(step, in: &cursor)
             memberCursor = cursor
             undoHaptic()
             return
@@ -373,7 +404,7 @@ final class DeckModel {
         if var cursor = entry.memberCursor,
            cursor.cardID == currentCard?.id,
            let step = cursor.history.popLast() {
-            restore(step)
+            restore(step, in: &cursor)
             memberCursor = cursor
         }
     }
@@ -389,8 +420,11 @@ final class DeckModel {
         return [keeper] + members.filter { $0 != keeper }
     }
 
-    /// Puts the current card's marks back as they were before `step`.
-    private func restore(_ step: MemberStep) {
+    /// Puts the current card's marks back as they were before `step`,
+    /// with its photo back on screen.
+    private func restore(_ step: MemberStep, in cursor: inout MemberCursor) {
+        if let index = cursor.order.firstIndex(of: step.key) { cursor.index = index }
+        if !step.wasDecided { cursor.decided.remove(step.key) }
         guard var card = currentCard, card.id == step.card.id else { return }
         card.markedKeys = step.card.markedKeys.intersection(card.group.memberKeys)
         card.userEdited = step.card.userEdited
