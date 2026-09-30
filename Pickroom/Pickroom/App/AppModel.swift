@@ -111,6 +111,11 @@ final class AppModel {
 
     private func startSessionIfPermitted() async {
         guard canTriage else { return }
+        // Launch and the first `.active` scene phase both land here at
+        // once; claim the session before the first suspension so only
+        // one of them reads the library.
+        let isFirstSession = !sessionStarted
+        sessionStarted = true
         if !isObservingLibrary {
             isObservingLibrary = true
             await library.observeChanges { [weak self] in
@@ -119,8 +124,7 @@ final class AppModel {
                 }
             }
         }
-        if !sessionStarted {
-            sessionStarted = true
+        if isFirstSession {
             AnalysisCoordinator.scheduleBackgroundTask()
             await startSession()
         } else {
@@ -323,7 +327,32 @@ final class AppModel {
         }
     }
 
+    private var rescanInFlight: Task<Void, Never>?
+    private var rescanQueued = false
+
+    /// Re-reads the library. Callers that arrive while a read is running
+    /// (Rescan, a PhotoKit change, a commit) don't start a second one:
+    /// they queue a single follow-up read and wait for it.
     private func rescanLibrary() async {
+        guard canTriage else { return }
+        if let running = rescanInFlight {
+            rescanQueued = true
+            await running.value
+            return
+        }
+        let task = Task { [weak self] in
+            guard let self else { return }
+            repeat {
+                rescanQueued = false
+                await performRescan()
+            } while rescanQueued
+        }
+        rescanInFlight = task
+        await task.value
+        rescanInFlight = nil
+    }
+
+    private func performRescan() async {
         guard canTriage else { return }
         let fresh = await library.loadAssetRecords()
         // Keep analysis results that are still valid (same
@@ -392,7 +421,6 @@ final class AppModel {
         defer { isRescanning = false }
         await rescanLibrary()
         await refreshPendingFigure()
-        if !analysis.isAnalysing { restartAnalysis() }
     }
 
     private func markScanned() {

@@ -447,29 +447,21 @@ final class AnalysisCoordinator {
     /// only assets already placed close together in time, a few
     /// thousand in a 50,000-asset library — never the whole thing.
     func fingerprintCandidates(records: [AssetRecord]) async -> [AssetRecord] {
-        isAnalysing = true
-        progress = 0
-        defer { isAnalysing = false }
-
-        let candidates = candidateRecords(records)
-        guard !candidates.isEmpty else { return records }
+        let allCandidates = candidateRecords(records)
+        guard !allCandidates.isEmpty else { return records }
         _ = await loadedFingerprintCache()
-        let progressStride = max(1, candidates.count / 200)
 
         var updated = records
         let byKey = Dictionary(uniqueKeysWithValues: records.enumerated().map {
             ($1.key, $0)
         })
-        var done = 0
 
-        for record in candidates {
-            // Thermal and Low Power throttling, pausable and resumable.
-            guard await waitWhilePaused(
-                "Fingerprinting paused — will resume when the device cools down"
-            ) else { return persistAndReturn(updated) }
-
-            // Cache first: same key, same modification date, same pinned
-            // revision and crop option → never recomputed.
+        // Cache first: same key, same modification date, same pinned
+        // revision and crop option → never recomputed. Applying saved
+        // prints is instant, so it doesn't count as analysing — Home
+        // only shows progress when there is real work.
+        var candidates: [AssetRecord] = []
+        for record in allCandidates {
             if let cached = fingerprintCache?.fingerprint(
                 forKey: record.key,
                 modificationDate: record.modificationDate
@@ -477,10 +469,25 @@ final class AnalysisCoordinator {
                 if let position = byKey[record.key] {
                     updated[position].fingerprint = cached
                 }
-                done += 1
-                if done % progressStride == 0 { progress = Double(done) / Double(candidates.count) }
-                continue
+            } else {
+                candidates.append(record)
             }
+        }
+        guard !candidates.isEmpty else { return updated }
+
+        isAnalysing = true
+        progress = 0
+        processedCount = 0
+        pendingCount = candidates.count
+        defer { isAnalysing = false }
+        let progressStride = max(1, candidates.count / 200)
+        var done = 0
+
+        for record in candidates {
+            // Thermal and Low Power throttling, pausable and resumable.
+            guard await waitWhilePaused(
+                "Fingerprinting paused — will resume when the device cools down"
+            ) else { return persistAndReturn(updated) }
 
             let identifier = Self.identifier(record)
             guard let rendition = await imageProvider.analysisRendition(for: identifier) else {
@@ -513,7 +520,10 @@ final class AnalysisCoordinator {
                 lastMessage = "Fingerprint failed for one asset"
             }
             done += 1
-            if done % progressStride == 0 { progress = Double(done) / Double(candidates.count) }
+            if done % progressStride == 0 || done == candidates.count {
+                processedCount = done
+                progress = Double(done) / Double(candidates.count)
+            }
             // The whole table is rewritten on each save — every 10
             // prints made the total cost quadratic on a big library.
             if done % 250 == 0 { persistFingerprintCache() }

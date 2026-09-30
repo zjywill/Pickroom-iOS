@@ -184,7 +184,7 @@ struct HomeView: View {
                         Text(analysis.lastMessage ?? "Analysing on this device…")
                             .font(.subheadline.weight(.bold))
                             .foregroundStyle(Camp.ink)
-                        Text("\(analysis.processedCount.formatted()) of \(analysis.pendingCount.formatted()) new photos")
+                        Text("\(analysis.processedCount.formatted()) of \(analysis.pendingCount.formatted()) photos")
                             .font(.caption.weight(.bold))
                             .foregroundStyle(Camp.muted)
                             .monospacedDigit()
@@ -192,6 +192,11 @@ struct HomeView: View {
                         Text("Reading your library…")
                             .font(.subheadline.weight(.bold))
                             .foregroundStyle(Camp.ink)
+                        // Two lines, like the idle state, so the panel
+                        // keeps its height.
+                        Text("Looking for new and edited photos")
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(Camp.muted)
                     } else {
                         Text("^[\(model.summary.totalAssets) item](inflect: true) scanned")
                             .font(.subheadline.weight(.bold))
@@ -214,11 +219,13 @@ struct HomeView: View {
                     Button {
                         Task { await model.rescan() }
                     } label: {
-                        if busy {
-                            CampSpinner(color: .white)
-                        } else {
-                            Label("Rescan", systemImage: "arrow.clockwise")
-                        }
+                        // The label keeps its size under the spinner so
+                        // the button doesn't shrink and shove the row.
+                        Label("Rescan", systemImage: "arrow.clockwise")
+                            .opacity(busy ? 0 : 1)
+                            .overlay {
+                                if busy { CampSpinner(color: .white) }
+                            }
                     }
                     .buttonStyle(ChunkyButtonStyle(
                         fill: Camp.wood,
@@ -240,6 +247,8 @@ struct HomeView: View {
             }
         }
         .campPanel(padding: 14)
+        .animation(.snappy, value: analysis.isAnalysing)
+        .animation(.snappy, value: busy)
     }
 
     /// What the engine found: counts by category. Each tile opens the
