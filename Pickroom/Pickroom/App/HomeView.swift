@@ -173,6 +173,10 @@ struct HomeView: View {
     /// The library scan: live counts while analysing, otherwise when it
     /// last ran and a Rescan button. Saved results mean a rescan only
     /// analyses new and edited photos.
+    ///
+    /// Every state has the same shape — two single lines, one trailing
+    /// slot, one progress bar — so the panel never changes height and
+    /// the sections below it don't jump while a rescan runs.
     private var scanPanel: some View {
         let analysis: AnalysisCoordinator = model.analysis
         let busy = model.isLoadingLibrary || model.isRescanning
@@ -180,71 +184,75 @@ struct HomeView: View {
             HStack(spacing: 10) {
                 IconBadge(systemImage: "sparkle.magnifyingglass", fill: Camp.later, foreground: Camp.laterInk, size: 30)
                 VStack(alignment: .leading, spacing: 2) {
-                    if analysis.isAnalysing {
-                        Text(analysis.lastMessage ?? "Analysing on this device…")
-                            .font(.subheadline.weight(.bold))
-                            .foregroundStyle(Camp.ink)
-                        Text("\(analysis.processedCount.formatted()) of \(analysis.pendingCount.formatted()) photos")
-                            .font(.caption.weight(.bold))
-                            .foregroundStyle(Camp.muted)
-                            .monospacedDigit()
-                    } else if busy {
-                        Text("Reading your library…")
-                            .font(.subheadline.weight(.bold))
-                            .foregroundStyle(Camp.ink)
-                        // Two lines, like the idle state, so the panel
-                        // keeps its height.
-                        Text("Looking for new and edited photos")
-                            .font(.caption.weight(.bold))
-                            .foregroundStyle(Camp.muted)
-                    } else {
-                        Text("^[\(model.summary.totalAssets) item](inflect: true) scanned")
-                            .font(.subheadline.weight(.bold))
-                            .foregroundStyle(Camp.ink)
-                            .monospacedDigit()
-                        if let date = model.lastScanDate {
-                            Text("Last scan \(date, format: .relative(presentation: .named))")
-                                .font(.caption.weight(.bold))
-                                .foregroundStyle(Camp.muted)
+                    Group {
+                        if analysis.isAnalysing {
+                            Text(analysis.lastMessage ?? "Analysing on this device…")
+                        } else if busy {
+                            Text("Reading your library…")
+                        } else {
+                            Text("^[\(model.summary.totalAssets) item](inflect: true) scanned")
                         }
                     }
-                }
-                Spacer(minLength: 0)
-                if analysis.isAnalysing {
-                    Text(analysis.progress, format: .percent.precision(.fractionLength(0)))
-                        .font(Camp.display(.callout, weight: .semibold))
-                        .foregroundStyle(Camp.laterEdge)
-                        .monospacedDigit()
-                } else {
-                    Button {
-                        Task { await model.rescan() }
-                    } label: {
-                        // The label keeps its size under the spinner so
-                        // the button doesn't shrink and shove the row.
-                        Label("Rescan", systemImage: "arrow.clockwise")
-                            .opacity(busy ? 0 : 1)
-                            .overlay {
-                                if busy { CampSpinner(color: .white) }
-                            }
+                    .font(.subheadline.weight(.bold))
+                    .foregroundStyle(Camp.ink)
+                    .monospacedDigit()
+                    Group {
+                        if analysis.isAnalysing {
+                            Text("\(analysis.processedCount.formatted()) of \(analysis.pendingCount.formatted()) photos")
+                        } else if busy {
+                            Text("Looking for new and edited photos")
+                        } else if let date = model.lastScanDate {
+                            Text("Last scan \(date, format: .relative(presentation: .named))")
+                        } else {
+                            Text("Not scanned yet")
+                        }
                     }
-                    .buttonStyle(ChunkyButtonStyle(
-                        fill: Camp.wood,
-                        edge: Camp.woodEdge,
-                        cornerRadius: 14,
-                        font: Camp.display(.subheadline, weight: .semibold),
-                        horizontalPadding: 14,
-                        verticalPadding: 8
-                    ))
-                    .disabled(busy)
-                    .accessibilityLabel("Rescan library")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(Camp.muted)
+                    .monospacedDigit()
+                }
+                // One line each, whatever the message, so a long pause
+                // notice can't wrap and grow the panel.
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+                Spacer(minLength: 0)
+                // The button always holds the slot; the percentage sits
+                // over it while analysing, so the row keeps its size.
+                Button {
+                    Task { await model.rescan() }
+                } label: {
+                    // The label keeps its size under the spinner so
+                    // the button doesn't shrink and shove the row.
+                    Label("Rescan", systemImage: "arrow.clockwise")
+                        .opacity(busy ? 0 : 1)
+                        .overlay {
+                            if busy { CampSpinner() }
+                        }
+                }
+                .buttonStyle(ChunkyButtonStyle(
+                    fill: Camp.wood,
+                    edge: Camp.woodEdge,
+                    cornerRadius: 14,
+                    font: Camp.display(.subheadline, weight: .semibold),
+                    horizontalPadding: 14,
+                    verticalPadding: 8
+                ))
+                .disabled(busy || analysis.isAnalysing)
+                .opacity(analysis.isAnalysing ? 0 : 1)
+                .accessibilityHidden(analysis.isAnalysing)
+                .accessibilityLabel("Rescan library")
+                .overlay {
+                    if analysis.isAnalysing {
+                        Text(analysis.progress, format: .percent.precision(.fractionLength(0)))
+                            .font(Camp.display(.callout, weight: .semibold))
+                            .foregroundStyle(Camp.laterEdge)
+                            .monospacedDigit()
+                    }
                 }
             }
-            if analysis.isAnalysing {
-                CampProgressBar(value: analysis.progress)
-                Text("Results are saved as they come — you can leave and come back without starting over.")
-                    .font(.caption)
-                    .foregroundStyle(Camp.muted)
-            }
+            // Always there: live while analysing, full once the library
+            // is scanned.
+            CampProgressBar(value: analysis.isAnalysing ? analysis.progress : 1)
         }
         .campPanel(padding: 14)
         .animation(.snappy, value: analysis.isAnalysing)
