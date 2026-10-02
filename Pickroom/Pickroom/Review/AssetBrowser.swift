@@ -80,6 +80,24 @@ enum BrowserMode {
     }
 }
 
+/// What a grid shows as its list changes underneath it.
+enum BrowserContents {
+    /// Keeps what's on screen — unless it has left the library — and
+    /// appends newcomers. Items that merely left the list stay, so a
+    /// tap never makes a photo jump away.
+    static func reconcile(
+        shown: [String],
+        keys: [String],
+        isInLibrary: (String) -> Bool
+    ) -> [String] {
+        let current = Set(keys)
+        var merged = shown.filter { current.contains($0) || isInLibrary($0) }
+        let present = Set(merged)
+        merged.append(contentsOf: keys.filter { !present.contains($0) })
+        return merged
+    }
+}
+
 /// The one way photos are handled in a grid, everywhere in the app:
 /// **tap a photo to mark it, tap again to keep it** — the same as the
 /// deck's member strip — and the corner button to look closer. Nothing
@@ -162,13 +180,13 @@ struct AssetBrowser<Header: View, Footer: View>: View {
             initiallyOn = Set(keys.filter { mode.isOn($0, model: model) })
         }
         .onChange(of: keys) { _, now in
-            // Keep what's on screen (unless it left the library) and
-            // append newcomers.
-            let current = Set(now)
-            var merged = shown.filter { current.contains($0) || model.recordsByKey[$0] != nil }
-            let present = Set(merged)
-            merged.append(contentsOf: now.filter { !present.contains($0) })
-            shown = merged
+            shown = BrowserContents.reconcile(shown: shown, keys: now) { model.recordsByKey[$0] != nil }
+        }
+        .onChange(of: model.lastScanDate) {
+            // A commit drops its photos from `keys` before the library
+            // is re-read, so they were still in it a moment ago and
+            // stayed on screen. Once the rescan lands, let them go.
+            shown = BrowserContents.reconcile(shown: shown, keys: keys) { model.recordsByKey[$0] != nil }
         }
         .fullScreenCover(item: $viewing) { target in
             AssetViewer(keys: shown, startKey: target.key, mode: mode, bestKey: bestKey, onMakeBest: onMakeBest)

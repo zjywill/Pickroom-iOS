@@ -207,4 +207,28 @@ final class QualityCacheTests: XCTestCase {
         XCTAssertEqual(cache.count, 1)
         XCTAssertFalse(cache.prune(retaining: ["photos:a"]))
     }
+
+    // MARK: - Grid contents
+
+    func testGridKeepsItemsThatOnlyLeftTheList() {
+        let shown = BrowserContents.reconcile(shown: ["a", "b"], keys: ["a"]) { _ in true }
+        XCTAssertEqual(shown, ["a", "b"], "a photo tapped to keep stays where it was")
+    }
+
+    func testGridDropsDeletedPhotosOnceTheLibraryIsReread() {
+        // Right after a commit the photos are out of the list but the
+        // library hasn't been re-read yet: they stay for now.
+        var library: Set<String> = ["a", "b", "c"]
+        var shown = BrowserContents.reconcile(shown: ["a", "b", "c"], keys: []) { library.contains($0) }
+        XCTAssertEqual(shown, ["a", "b", "c"])
+        // The rescan lands without the list changing again.
+        library = []
+        shown = BrowserContents.reconcile(shown: shown, keys: []) { library.contains($0) }
+        XCTAssertEqual(shown, [])
+    }
+
+    func testGridAppendsNewcomers() {
+        let shown = BrowserContents.reconcile(shown: ["a"], keys: ["b", "a"]) { _ in true }
+        XCTAssertEqual(shown, ["a", "b"])
+    }
 }
