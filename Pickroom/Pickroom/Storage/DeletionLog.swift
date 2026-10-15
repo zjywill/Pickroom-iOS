@@ -90,11 +90,14 @@ actor DeletionLog {
 ///   nothing; the journal folds into the snapshot on launch and
 ///   whenever it grows past `journalCompactionThreshold`.
 /// - `groups.bin`: group id → state, including permanent dismissals.
+/// - `settled.bin`: photo key → the state of the set it was settled
+///   in, so a set whose membership shifted doesn't ask again.
 /// - `session.bin`: the exact card the user was on.
 actor PersistenceStore {
     private let directory: URL
     private var decisions: [String: PhotoDecision]
     private var groupStates: [String: GroupState]
+    private var settledMembers: [String: GroupState]
     private var session: StoredSession?
     private var journalEntryCount = 0
 
@@ -154,6 +157,9 @@ actor PersistenceStore {
         }
         groupStates = Self.loadDictionary(
             support.appendingPathComponent("groups.bin")
+        ) ?? [:]
+        settledMembers = Self.loadDictionary(
+            support.appendingPathComponent("settled.bin")
         ) ?? [:]
         if
             let data = try? Data(
@@ -252,14 +258,30 @@ actor PersistenceStore {
 
     func loadGroupStates() -> [String: GroupState] { groupStates }
 
-    func saveGroupState(id: String, state: GroupState) {
+    /// Photo key → the state of the set it was last settled in.
+    func loadSettledMembers() -> [String: GroupState] { settledMembers }
+
+    /// Records a set's state, and its photos with it: resolving or
+    /// ignoring a set settles them; reopening one unsettles them, so
+    /// it can't be carried shut again under a new id.
+    func saveGroupState(id: String, state: GroupState, members: [String] = []) {
         groupStates[id] = state
         persistGroupStates()
+        guard !members.isEmpty else { return }
+        for key in members {
+            settledMembers[key] = state == .pending ? nil : state
+        }
+        persistSettledMembers()
     }
 
     private func persistGroupStates() {
         let url = directory.appendingPathComponent("groups.bin")
         try? Self.writeDictionary(groupStates, to: url)
+    }
+
+    private func persistSettledMembers() {
+        let url = directory.appendingPathComponent("settled.bin")
+        try? Self.writeDictionary(settledMembers, to: url)
     }
 
     // MARK: - Start over
@@ -276,6 +298,8 @@ actor PersistenceStore {
 
         groupStates = groupStates.filter { !includingIgnored && $0.value == .dismissed }
         persistGroupStates()
+        settledMembers = settledMembers.filter { !includingIgnored && $0.value == .dismissed }
+        persistSettledMembers()
 
         session = nil
         try? FileManager.default.removeItem(at: directory.appendingPathComponent("session.bin"))

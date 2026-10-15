@@ -296,3 +296,50 @@ final class RevisionGuardTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(metric.distance(b, sameOption)), 0.2, accuracy: 1e-6)
     }
 }
+
+/// A set whose membership shifted gets a new id. When every photo in it
+/// was already settled, it must not come back to be reviewed again.
+final class SettledMembersTests: XCTestCase {
+    private func burst(_ keys: [String]) -> [AssetRecord] {
+        keys.enumerated().map { index, key in
+            Fixtures.asset(key, capturedAt: Fixtures.base.addingTimeInterval(Double(index) * 0.2), burstIdentifier: "B")
+        }
+    }
+
+    func testSetOfSettledPhotosCarriesTheirDecision() throws {
+        // a, b, c were resolved as a set; c was then deleted. The
+        // surviving a + b form a set with a new id.
+        let (groups, _) = GroupEngine().makeGroups(
+            assets: burst(["a", "b"]),
+            settledMembers: ["a": .resolved, "b": .resolved, "c": .resolved]
+        )
+        let set = try XCTUnwrap(groups.first { $0.kind == .burst })
+        XCTAssertEqual(set.state, .resolved)
+    }
+
+    func testAnUnseenPhotoKeepsTheSetPending() throws {
+        let (groups, _) = GroupEngine().makeGroups(
+            assets: burst(["a", "b", "new"]),
+            settledMembers: ["a": .resolved, "b": .resolved]
+        )
+        XCTAssertEqual(try XCTUnwrap(groups.first { $0.kind == .burst }).state, .pending)
+    }
+
+    func testIgnoredPhotosStayIgnoredAndExplicitStateWins() throws {
+        let assets = burst(["a", "b"])
+        let id = PhotoGroup.makeID(kind: .burst, memberKeys: ["a", "b"])
+        let ignored = GroupEngine().makeGroups(
+            assets: assets,
+            settledMembers: ["a": .dismissed, "b": .dismissed]
+        ).groups.first { $0.kind == .burst }
+        XCTAssertEqual(ignored?.state, .dismissed)
+
+        // A set reopened by undo stays open.
+        let reopened = GroupEngine().makeGroups(
+            assets: assets,
+            groupStates: [id: .pending],
+            settledMembers: ["a": .resolved, "b": .resolved]
+        ).groups.first { $0.kind == .burst }
+        XCTAssertEqual(reopened?.state, .pending)
+    }
+}

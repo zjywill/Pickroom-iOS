@@ -80,6 +80,7 @@ public struct GroupEngine: Sendable {
     public func makeGroups(
         assets: [AssetRecord],
         groupStates: [String: GroupState] = [:],
+        settledMembers: [String: GroupState] = [:],
         now: Date = Date()
     ) -> (groups: [PhotoGroup], summary: LibrarySummary) {
         var summary = LibrarySummary(totalAssets: assets.count)
@@ -157,10 +158,16 @@ public struct GroupEngine: Sendable {
         summary.failedFrameCount = assets.filter { $0.quality?.tier == .obviouslyBroken }.count
 
         // Apply persisted state; the group id is stable across rescans,
-        // so a dismissal recorded last month still holds.
+        // so a dismissal recorded last month still holds. A set whose
+        // membership shifted (some of it deleted, a late fingerprint
+        // adding or dropping a frame) has a new id — when every one of
+        // its photos was already settled in an earlier set, it carries
+        // that decision instead of asking again.
         groups = groups.map { group in
             var updated = group
-            updated.state = groupStates[group.id] ?? group.state
+            updated.state = groupStates[group.id]
+                ?? Self.carriedState(of: group.memberKeys, settled: settledMembers)
+                ?? group.state
             return updated
         }
 
@@ -175,6 +182,25 @@ public struct GroupEngine: Sendable {
         }
         summary.groupCount = groups.count
         return (groups, summary)
+    }
+
+    /// The state a new set inherits from its photos: dismissed when
+    /// every photo was in an ignored set, resolved when every photo was
+    /// settled one way or the other, nothing when any photo is new.
+    static func carriedState(
+        of memberKeys: [String],
+        settled: [String: GroupState]
+    ) -> GroupState? {
+        guard !memberKeys.isEmpty else { return nil }
+        var allDismissed = true
+        for key in memberKeys {
+            switch settled[key] {
+            case .dismissed: continue
+            case .resolved: allDismissed = false
+            case .pending, nil: return nil
+            }
+        }
+        return allDismissed ? .dismissed : .resolved
     }
 
     // MARK: - Exact duplicates

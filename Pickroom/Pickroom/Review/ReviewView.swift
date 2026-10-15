@@ -236,7 +236,16 @@ private struct GroupDetailView: View {
                 SetPage(
                     group: group,
                     mode: .toss,
-                    onDecided: { snapshot in decided(group, snapshot: snapshot) },
+                    onDecided: { snapshot in
+                        decided(
+                            group,
+                            snapshot: snapshot,
+                            message: "Kept the best · ^[\(group.memberKeys.count - 1) other](inflect: true) marked"
+                        )
+                    },
+                    onKeptAll: { snapshot in
+                        decided(group, snapshot: snapshot, message: "Kept all \(group.memberKeys.count)")
+                    },
                     externalToast: $toast
                 )
                 .id(currentID)
@@ -295,11 +304,11 @@ private struct GroupDetailView: View {
 
     /// The set is decided: resolve it, raise the undo toast, and move to
     /// the next undecided set after it (or back to the list).
-    private func decided(_ group: PhotoGroup, snapshot: DeckModel.DecisionSnapshot) {
+    private func decided(_ group: PhotoGroup, snapshot: DeckModel.DecisionSnapshot, message: String) {
         let id = group.id
         Task { await model.setGroupState(id: id, .resolved) }
         toast = BrowserToast(
-            message: "Kept the best · ^[\(group.memberKeys.count - 1) other](inflect: true) marked",
+            message: message,
             snapshot: snapshot,
             onUndo: {
                 Task { await model.setGroupState(id: id, .pending) }

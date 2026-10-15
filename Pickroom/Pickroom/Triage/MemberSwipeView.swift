@@ -77,6 +77,25 @@ struct MemberSwipeView: View {
                 .foregroundStyle(Camp.muted)
                 .monospacedDigit()
             Spacer(minLength: 0)
+            if order.count > 1 {
+                Button {
+                    guard !isFlying else { return }
+                    withAnimation(.snappy) { deck.keep() }
+                } label: {
+                    Label("Keep all", systemImage: "checkmark.circle")
+                        .lineLimit(1)
+                }
+                .buttonStyle(ChunkyButtonStyle(
+                    fill: Camp.cream,
+                    edge: Camp.panelEdge,
+                    foreground: Camp.keep,
+                    cornerRadius: 14,
+                    font: Camp.display(.subheadline, weight: .semibold),
+                    horizontalPadding: 12,
+                    verticalPadding: 7
+                ))
+                .accessibilityHint("Keeps every photo in this set and moves to the next one")
+            }
             Button(action: onIgnore) {
                 Image(systemName: "eye.slash")
             }
@@ -256,7 +275,7 @@ struct MemberSwipeView: View {
         )
     }
 
-    /// Hardware keyboard: ← toss, → keep, ↑ later, ⌘Z back.
+    /// Hardware keyboard: ← toss, → keep, ↑ later, ⌘↩ keep all, ⌘Z back.
     @ViewBuilder
     private var hardwareKeyboardShortcuts: some View {
         Group {
@@ -266,6 +285,8 @@ struct MemberSwipeView: View {
                 .keyboardShortcut(.rightArrow, modifiers: [])
             Button("Later") { deck.decideLater() }
                 .keyboardShortcut(.upArrow, modifiers: [])
+            Button("Keep all") { deck.keep() }
+                .keyboardShortcut(.return, modifiers: .command)
             Button("Back") { deck.back() }
                 .keyboardShortcut("z", modifiers: .command)
                 .disabled(!deck.canGoBack)

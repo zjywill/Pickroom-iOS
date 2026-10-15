@@ -676,4 +676,44 @@ final class DeckModelTests: XCTestCase {
         XCTAssertEqual(deck.currentCard?.id, "shots", "the only set comes straight back")
         XCTAssertEqual(deck.memberPosition, 0)
     }
+
+    // MARK: - Settled photos
+
+    func testKeepAllWithdrawsMarksAndSettlesTheSet() async throws {
+        let deck = DeckModel(
+            groups: [burstGroup(flagged: ["photos:b", "photos:c"])],
+            records: makeRecords(),
+            persistence: persistence
+        )
+        deck.swipeMember(discard: true)
+        deck.keep()
+        await deck.settleWrites()
+
+        XCTAssertTrue(deck.isFinished)
+        let decisions = await persistence.loadDecisions()
+        XCTAssertTrue(decisions.values.allSatisfy { $0 != .reject }, "keep all tosses nothing")
+        let settled = await persistence.loadSettledMembers()
+        XCTAssertEqual(settled, ["photos:a": .resolved, "photos:b": .resolved, "photos:c": .resolved])
+
+        deck.undo()
+        await deck.settleWrites()
+        let unsettled = await persistence.loadSettledMembers()
+        XCTAssertTrue(unsettled.isEmpty, "undo reopens the set and its photos")
+    }
+
+    func testOnlyNewPhotosNeedASwipeInAReshapedSet() {
+        // a and b were kept in an earlier set; c is new.
+        let deck = DeckModel(
+            groups: [burstGroup(flagged: ["photos:b", "photos:c"])],
+            records: makeRecords(),
+            settledKeys: ["photos:a", "photos:b"],
+            persistence: persistence
+        )
+        XCTAssertEqual(deck.currentCard?.markedKeys, ["photos:c"], "a photo kept before isn't proposed again")
+        XCTAssertEqual(deck.decidedMemberKeys, ["photos:a", "photos:b"])
+        XCTAssertEqual(deck.currentMemberKey, "photos:c")
+
+        deck.swipeMember(discard: false)
+        XCTAssertTrue(deck.isFinished, "one swipe resolves the set")
+    }
 }

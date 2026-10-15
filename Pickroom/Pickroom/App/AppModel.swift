@@ -180,13 +180,18 @@ final class AppModel {
         rebuildGeneration += 1
         let generation = rebuildGeneration
         let groupStates = await persistence.loadGroupStates()
+        let settledMembers = await persistence.loadSettledMembers()
         // The engine is pure; on a library of thousands it takes long
         // enough to freeze the UI, so it runs off the main thread over
         // a snapshot.
         let engine = engine
         let records = records
         let (newGroups, newSummary) = await Task.detached(priority: .userInitiated) {
-            engine.makeGroups(assets: records, groupStates: groupStates)
+            engine.makeGroups(
+                assets: records,
+                groupStates: groupStates,
+                settledMembers: settledMembers
+            )
         }.value
         // A newer rebuild started while this one ran; its result wins.
         guard generation == rebuildGeneration else { return }
@@ -198,12 +203,13 @@ final class AppModel {
                 groups: newGroups,
                 records: records,
                 decisions: decisions,
+                settledKeys: Set(settledMembers.keys),
                 persistence: persistence
             )
             await deck?.restoreSession()
             await deck?.rankCurrentCard()
         } else {
-            deck?.reload(groups: newGroups, records: records)
+            deck?.reload(groups: newGroups, records: records, settledKeys: Set(settledMembers.keys))
         }
     }
 
@@ -451,7 +457,8 @@ final class AppModel {
     /// A set decided (or reopened by undo) from Review → Sets. Resolved
     /// sets leave the Triage deck; pending ones come back to it.
     func setGroupState(id: String, _ state: GroupState) async {
-        await persistence.saveGroupState(id: id, state: state)
+        let members = groups.first { $0.id == id }?.memberKeys ?? []
+        await persistence.saveGroupState(id: id, state: state, members: members)
         await rebuildDeck(decisions: currentDecisions)
     }
 

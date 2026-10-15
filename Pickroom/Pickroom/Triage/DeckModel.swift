@@ -98,6 +98,11 @@ final class DeckModel {
     private var memberCursor: MemberCursor?
 
     private var records: [String: AssetRecord]
+    /// Photos already settled in an earlier set. When a set comes back
+    /// with a new id (its membership shifted), these start out decided
+    /// — kept, or marked if they were rejected — so only the new
+    /// photos need a swipe.
+    private var settledKeys: Set<String>
     private let persistence: PersistenceStore
     private let ranker: any ShotRanker
 
@@ -113,6 +118,7 @@ final class DeckModel {
         groups: [PhotoGroup],
         records: [AssetRecord],
         decisions: [String: PhotoDecision] = [:],
+        settledKeys: Set<String> = [],
         ranker: any ShotRanker = FallbackShotRanker(),
         persistence: PersistenceStore
     ) {
@@ -121,7 +127,10 @@ final class DeckModel {
         // previous sessions are skipped.
         self.cards = groups
             .filter { $0.state == .pending }
-            .map { CardModel(group: $0, markedKeys: Self.initialMarks($0, decisions: decisions)) }
+            .map {
+                CardModel(group: $0, markedKeys: Self.initialMarks($0, decisions: decisions, settled: settledKeys))
+            }
+        self.settledKeys = settledKeys
         self.laterQueue = []
         self.currentIndex = 0
         self.records = Dictionary(
@@ -182,7 +191,9 @@ final class DeckModel {
 
     // MARK: - Gestures
 
-    /// Swipe right — keep. Resolves the card; no member is deleted.
+    /// Swipe right — keep, and the set page's "Keep all". Resolves the
+    /// card; no member is deleted, and marks from earlier in the walk
+    /// are withdrawn.
     func keep() {
         applySwipe(.keep)
     }
@@ -342,8 +353,7 @@ final class DeckModel {
     /// Brings any photo of the current set up on screen — swiped or not
     /// — without deciding anything. Not an undoable step.
     func showMember(_ key: String) {
-        guard let card = currentCard else { return }
-        var cursor = activeCursor ?? MemberCursor(cardID: card.id, order: reviewOrder(for: card))
+        guard var cursor = activeCursor else { return }
         guard let index = cursor.order.firstIndex(of: key), index != cursor.index else { return }
         cursor.index = index
         memberCursor = cursor
@@ -355,8 +365,7 @@ final class DeckModel {
     /// brings up the next set. A swipe left on the user's own pick
     /// withdraws the pick — the latest explicit gesture wins.
     func swipeMember(discard: Bool) {
-        guard var card = currentCard else { return }
-        var cursor = activeCursor ?? MemberCursor(cardID: card.id, order: reviewOrder(for: card))
+        guard var card = currentCard, var cursor = activeCursor else { return }
         guard cursor.order.indices.contains(cursor.index) else { return }
         let key = cursor.order[cursor.index]
         let before = card
@@ -409,8 +418,17 @@ final class DeckModel {
         }
     }
 
+    /// The walk through the current set — the one in progress, or a
+    /// fresh one that starts past the photos already settled.
     private var activeCursor: MemberCursor? {
-        guard let cursor = memberCursor, cursor.cardID == currentCard?.id else { return nil }
+        guard let card = currentCard else { return nil }
+        if let cursor = memberCursor, cursor.cardID == card.id { return cursor }
+        var cursor = MemberCursor(cardID: card.id, order: reviewOrder(for: card))
+        let settled = cursor.order.filter { settledKeys.contains($0) }
+        if settled.count < cursor.order.count {
+            cursor.decided = Set(settled)
+            cursor.index = cursor.order.firstIndex { !settledKeys.contains($0) } ?? 0
+        }
         return cursor
     }
 
@@ -561,9 +579,13 @@ final class DeckModel {
     /// Groups this deck already resolved carry `.resolved` state from
     /// persistence, so they drop out naturally — the undo stack is the
     /// belt-and-braces source for resolutions still in flight.
-    func reload(groups: [PhotoGroup], records: [AssetRecord]) {
+    func reload(groups: [PhotoGroup], records: [AssetRecord], settledKeys: Set<String>? = nil) {
         let currentID = currentCard?.id
         let resolvedHere = Set(undoStack.map(\.groupID))
+        if let settledKeys {
+            // Sets resolved here may not have reached the store yet.
+            self.settledKeys = settledKeys.union(undoStack.flatMap(\.card.group.memberKeys))
+        }
         // Cards that survive the reload keep what the user did to them:
         // mark edits, the ranked suggestion, and a place in the later
         // pile.
@@ -576,7 +598,10 @@ final class DeckModel {
         var fresh: [CardModel] = []
         var deferred: [String: CardModel] = [:]
         for group in groups where group.state == .pending && !resolvedHere.contains(group.id) {
-            var card = CardModel(group: group, markedKeys: Self.initialMarks(group, decisions: decisions))
+            var card = CardModel(
+                group: group,
+                markedKeys: Self.initialMarks(group, decisions: decisions, settled: self.settledKeys)
+            )
             if let old = previous[group.id] {
                 card.markedKeys = old.markedKeys.intersection(group.memberKeys)
                 card.suggestion = old.suggestion
@@ -613,8 +638,10 @@ final class DeckModel {
         guard let card = currentCard else { return }
         memberCursor = nil
         let groupID = card.group.id
+        let members = card.group.memberKeys
+        settledKeys.formUnion(members)
         enqueueWrite {
-            await self.persistence.saveGroupState(id: groupID, state: .dismissed)
+            await self.persistence.saveGroupState(id: groupID, state: .dismissed, members: members)
         }
         commitHaptic()
         if currentIndex < cards.count {
@@ -647,8 +674,13 @@ final class DeckModel {
             } else {
                 await self.persistence.saveDecisions(undoEntry.previous)
             }
-            await self.persistence.saveGroupState(id: undoEntry.groupID, state: .pending)
+            await self.persistence.saveGroupState(
+                id: undoEntry.groupID,
+                state: .pending,
+                members: undoEntry.card.group.memberKeys
+            )
         }
+        settledKeys.subtract(entry.card.group.memberKeys)
 
         // Put the card back in front — from wherever it now sits, or
         // from the snapshot when an engine reload dropped it.
@@ -742,6 +774,8 @@ final class DeckModel {
         card.markedKeys = Set(
             card.group.memberKeys.filter { key in
                 if decisions[key] == .reject { return true }
+                // Kept in an earlier set: that decision stands.
+                if settledKeys.contains(key) { return false }
                 return key != keeper
                     && decisions[key] != .pick
                     && records[key]?.isProposable == true
@@ -841,8 +875,10 @@ final class DeckModel {
             }
         }
         let groupID = card.group.id
+        let members = card.group.memberKeys
+        settledKeys.formUnion(members)
         enqueueWrite {
-            await self.persistence.saveGroupState(id: groupID, state: .resolved)
+            await self.persistence.saveGroupState(id: groupID, state: .resolved, members: members)
         }
 
         pushUndo(
@@ -883,11 +919,13 @@ final class DeckModel {
     /// chose to keep.
     private static func initialMarks(
         _ group: PhotoGroup,
-        decisions: [String: PhotoDecision]
+        decisions: [String: PhotoDecision],
+        settled: Set<String> = []
     ) -> Set<String> {
         // Plus anything already marked for deletion (an earlier session,
         // the review grids), so the set shows every ✕ that is real.
-        Set(group.flaggedKeys.filter { decisions[$0] != .pick })
+        // Photos kept in an earlier set aren't proposed again.
+        Set(group.flaggedKeys.filter { decisions[$0] != .pick && !settled.contains($0) })
             .union(group.memberKeys.filter { decisions[$0] == .reject })
     }
 

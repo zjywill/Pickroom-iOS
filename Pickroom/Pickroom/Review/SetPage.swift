@@ -17,6 +17,9 @@ struct SetPage<Footer: View>: View {
     /// the caller moves on to the next set (and, in Review, raises the
     /// undo toast itself so it survives the page change).
     var onDecided: ((DeckModel.DecisionSnapshot) -> Void)?
+    /// Called after "Keep all" with what it replaced; offers the button
+    /// when set.
+    var onKeptAll: ((DeckModel.DecisionSnapshot) -> Void)?
     /// A toast owned by the caller, so it outlives this page.
     var externalToast: Binding<BrowserToast?>?
     @ViewBuilder var footer: () -> Footer
@@ -94,6 +97,18 @@ struct SetPage<Footer: View>: View {
                                 .font(.footnote)
                                 .foregroundStyle(Camp.muted)
                                 .campPanel(padding: 14)
+                        }
+                        if let onKeptAll, group.memberKeys.count > 1 {
+                            Button {
+                                guard let deck = model.deck else { return }
+                                let snapshot = withAnimation(.snappy) { deck.keep(keys: group.memberKeys) }
+                                onKeptAll(snapshot)
+                            } label: {
+                                Label("Keep all \(group.memberKeys.count)", systemImage: "checkmark.circle")
+                                    .lineLimit(1)
+                                    .frame(maxWidth: .infinity)
+                            }
+                            .buttonStyle(.campPlain)
                         }
                         footer()
                     }
@@ -183,9 +198,17 @@ extension SetPage where Footer == EmptyView {
         group: PhotoGroup,
         mode: BrowserMode,
         onDecided: ((DeckModel.DecisionSnapshot) -> Void)? = nil,
+        onKeptAll: ((DeckModel.DecisionSnapshot) -> Void)? = nil,
         externalToast: Binding<BrowserToast?>? = nil
     ) {
-        self.init(group: group, mode: mode, onDecided: onDecided, externalToast: externalToast, footer: { EmptyView() })
+        self.init(
+            group: group,
+            mode: mode,
+            onDecided: onDecided,
+            onKeptAll: onKeptAll,
+            externalToast: externalToast,
+            footer: { EmptyView() }
+        )
     }
 }
 
